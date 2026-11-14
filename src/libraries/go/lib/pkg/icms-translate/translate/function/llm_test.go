@@ -426,6 +426,61 @@ func TestNewLLMRouterClientContainer(t *testing.T) {
 	}
 }
 
+func TestNewLLMRouterClientContainer_PylonImageTag_GatesCalibration(t *testing.T) {
+	cases := []struct {
+		name                 string
+		image                string
+		isCalibrationEnabled bool
+	}{
+		{name: "above cutoff", image: "registry.example.com/nvcf/pylon:0.32.1", isCalibrationEnabled: true},
+		{name: "at cutoff", image: "registry.example.com/nvcf/pylon:0.31.0", isCalibrationEnabled: true},
+		{name: "below cutoff", image: "registry.example.com/nvcf/pylon:0.30.7", isCalibrationEnabled: false},
+		{name: "prerelease of cutoff", image: "registry.example.com/nvcf/pylon:0.31.0-rc.1", isCalibrationEnabled: false},
+		{
+			name:                 "digest after tag at cutoff",
+			image:                "registry.example.com/nvcf/pylon:0.31.0@sha256:" + strings.Repeat("a", 64),
+			isCalibrationEnabled: true,
+		},
+		{
+			name:                 "digest after tag below cutoff",
+			image:                "registry.example.com/nvcf/pylon:0.30.7@sha256:" + strings.Repeat("a", 64),
+			isCalibrationEnabled: false,
+		},
+		{name: "git SHA tag", image: "registry.example.com/nvcf/llm-router-client:1a2b3c4d", isCalibrationEnabled: false},
+		{name: "numeric non-semver tag", image: "registry.example.com/nvcf/pylon:20261105", isCalibrationEnabled: false},
+		{name: "registry port without tag", image: "registry.example.com:5000/nvcf/pylon", isCalibrationEnabled: false},
+		{name: "default image", image: "", isCalibrationEnabled: false},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			allEnvSet := map[string]string{
+				"LLM_REQUEST_ROUTER_ADDRESS": "llm-router.example.com:443",
+				"INFERENCE_PORT":             "8080",
+			}
+			if tt.image != "" {
+				allEnvSet["LLM_ROUTER_CLIENT_IMAGE"] = tt.image
+			}
+
+			c, err := newLLMRouterClientContainer(&LaunchSpecification{}, allEnvSet, TranslateConfig{}, "inst-1", false)
+
+			require.NoError(t, err)
+			assert.Contains(t, c.Args, "--initial-input-tps=100")
+			var calibrationArgs []string
+			for _, arg := range c.Args {
+				if strings.HasPrefix(arg, "--do-calibration") {
+					calibrationArgs = append(calibrationArgs, arg)
+				}
+			}
+			if tt.isCalibrationEnabled {
+				assert.Equal(t, []string{"--do-calibration"}, calibrationArgs)
+			} else {
+				assert.Empty(t, calibrationArgs)
+			}
+		})
+	}
+}
+
 func TestNewLLMCredentialManagerContainer(t *testing.T) {
 	type spec struct {
 		name      string

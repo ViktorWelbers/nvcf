@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Masterminds/semver/v3"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 
@@ -42,6 +43,9 @@ const (
 	llmRouterClientImageDefault      = "nvcr.io/0651155215864979/ncp-dev/stargate-client:0.4.0"
 	llmRequestRouterAddressEnv       = "LLM_REQUEST_ROUTER_ADDRESS"
 	legacyStargateAddressEnv         = "STARGATE_ADDRESS"
+	// The first Pylon release that accepts --do-calibration together with
+	// --initial-input-tps. Older Pylons reject the pair at startup.
+	pylonCalibrationMinVersion = "0.31.0"
 
 	llmDirMountPath    = "/var/run/llm"
 	llmWorkerTokenPath = llmDirMountPath + "/worker-token"
@@ -150,6 +154,20 @@ func upstreamHealthPath(allEnvSet map[string]string) string {
 	return path
 }
 
+// isPylonCalibrationSupported reports whether the Pylon image tag is a strict
+// semver release at or above pylonCalibrationMinVersion. Strict parsing keeps
+// git SHA and numeric tags on the old arguments.
+func isPylonCalibrationSupported(image string) bool {
+	reference, _, _ := strings.Cut(image, "@")
+	_, tag, _ := strings.Cut(reference[strings.LastIndex(reference, "/")+1:], ":")
+	version, err := semver.StrictNewVersion(tag)
+	if err != nil {
+		fmt.Printf("Pylon image %q has no semver tag; not enabling Pylon calibration\n", image)
+		return false
+	}
+	return !version.LessThan(semver.MustParse(pylonCalibrationMinVersion))
+}
+
 // newLLMRouterClientContainer builds the Pylon sidecar for an LLM worker.
 func newLLMRouterClientContainer(
 	ls *LaunchSpecification,
@@ -228,6 +246,9 @@ func newLLMRouterClientContainer(
 		fmt.Sprintf("--auth-token-file=%s", llmWorkerTokenPath),
 		"--backend-connectivity=reverse",
 		"--initial-input-tps=100",
+	}
+	if isPylonCalibrationSupported(llmRouterClientImage) {
+		args = append(args, "--do-calibration")
 	}
 	// NVCF stores 1 when a deployment leaves maxRequestConcurrency unset, so a
 	// value of 1 cannot be told apart from the default. As an engine limit it
