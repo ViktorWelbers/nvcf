@@ -44,21 +44,39 @@ pub(crate) async fn run_calibration(
     }
 
     let started_at = Instant::now();
+    let deadline = config
+        .fallback
+        .map(|fallback| tokio::time::Instant::now() + fallback.total_timeout);
     let mut last_completed = None;
     let mut completed_prompt_units = Vec::new();
 
     let mut ramp = calibration_ramp(config);
     while let Some(step) = ramp.next() {
-        match send_calibration_batch(
+        let step_timeout = deadline.map_or(config.calibration_timeout, |deadline| {
+            config
+                .calibration_timeout
+                .min(deadline.saturating_duration_since(tokio::time::Instant::now()))
+        });
+        let result = send_calibration_batch(
             http_client,
             upstream_http_base_url,
             generation,
-            config.calibration_timeout,
+            step_timeout,
             step,
             runtime_state,
+            config.fallback.is_some(),
         )
-        .await
-        {
+        .await;
+        // With a fallback rate, a 529 ends the ramp like a step timeout and keeps
+        // the window measured so far.
+        let upstream_overloaded =
+            config.fallback.is_some() && result.as_ref().is_err_and(BringupError::is_overloaded);
+        let outcome = if upstream_overloaded {
+            Ok(CalibrationStepOutcome::Saturated)
+        } else {
+            result
+        };
+        match outcome {
             Ok(CalibrationStepOutcome::Completed) => {
                 if completed_prompt_units.last() != Some(&step.prompt_units) {
                     completed_prompt_units.push(step.prompt_units);
@@ -82,6 +100,7 @@ pub(crate) async fn run_calibration(
                     timed_out_prompt_units = step.prompt_units,
                     timed_out_request_count = step.request_count,
                     timed_out_concurrency = step.concurrency,
+                    upstream_overloaded,
                     duration_ms = started_at.elapsed().as_secs_f64() * 1_000.0,
                     current_input_tps = stats.last_mean_input_tps,
                     current_output_tps = stats.output_tps,
@@ -186,6 +205,7 @@ pub(super) async fn send_calibration_batch(
     timeout: Duration,
     batch: CalibrationBatch,
     runtime_state: &PylonRuntimeState,
+    input_tokens_from_usage: bool,
 ) -> Result<CalibrationStepOutcome, BringupError> {
     let CalibrationBatch {
         prompt_units,
@@ -209,6 +229,7 @@ pub(super) async fn send_calibration_batch(
                 GeneratedRequestKind::Calibration,
                 generation,
                 Some(runtime_state),
+                input_tokens_from_usage,
             )
             .await
         }

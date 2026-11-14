@@ -267,14 +267,22 @@ engine cluster reports a valid maximum. Historical per-observer peaks are not
 additive. Pulsar uses maximum capacity by default; queue estimates still use
 mean capacity.
 
-Before registration, Pylon initializes each model generation from exactly one
-source. `--initial-input-tps` installs the configured value. Local calibration
+Before registration, Pylon initializes each model generation from one source.
+`--initial-input-tps` installs the configured value. Local calibration
 installs nothing: it runs an increasing request ramp until a load-step timeout,
 and those requests' exact-generation observer events build the same distribution
 used at runtime. Each calibration request starts with a unique prompt prefix, so
 it cannot hit the prefix cache. Duplicate engine events for calibration IDs are
 ignored. Pylon logs the current stats at timeout without reinjecting them.
 Later valid runtime samples continue updating either unpinned distribution.
+
+With both `--do-calibration` and `--initial-input-tps`, Pylon calibrates only
+the first model name, once per start, and installs the measured mean for every
+other model, including models discovered later. The ramp stops after 10 s or at
+a 529 response, like a load-step timeout, and its requests count input tokens
+from the response `usage.prompt_tokens`. If calibration fails or measures no
+input rate, Pylon logs a warning and installs the `--initial-input-tps` value
+for every model. An unhealthy upstream still fails startup.
 
 Labels:
 

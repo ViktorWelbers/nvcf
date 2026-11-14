@@ -35,7 +35,7 @@ mod test_support;
 mod upstream_health;
 mod upstream_url;
 
-pub use bringup::{BringupConfig, BringupError, CalibrationConfig};
+pub use bringup::{BringupConfig, BringupError, CalibrationConfig, CalibrationFallback};
 pub use model_discovery::{
     ModelDiscoveryConfig, ModelDiscoveryError, ModelDiscoveryProvider,
     ParseModelDiscoveryProviderError,
