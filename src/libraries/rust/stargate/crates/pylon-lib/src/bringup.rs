@@ -991,18 +991,30 @@ mod tests {
 
     #[tokio::test]
     async fn overload_ends_a_fallback_calibration_and_keeps_the_measured_window() {
-        let server = spawn_overloading_server(3).await;
+        for (label, completions, is_measured) in [
+            ("529 after completed requests", 3, true),
+            ("529 before any completed request", 0, false),
+        ] {
+            let server = spawn_overloading_server(completions).await;
 
-        let (result, input_tps) = run_test_calibration(
-            server.as_str(),
-            Duration::from_secs(30),
-            test_fallback(Duration::from_secs(30)),
-        )
-        .await;
+            let (result, input_tps) = run_test_calibration(
+                server.as_str(),
+                Duration::from_secs(30),
+                test_fallback(Duration::from_secs(30)),
+            )
+            .await;
 
-        result.expect("a 529 after completed requests should end the ramp with their rate");
-        assert!(input_tps > 0.0);
-        server.shutdown().await;
+            if is_measured {
+                result.unwrap_or_else(|error| panic!("{label}: {error}"));
+                assert!(input_tps > 0.0, "{label}");
+            } else {
+                assert!(
+                    matches!(result, Err(BringupError::InsufficientCalibrationData)),
+                    "{label}: {result:?}"
+                );
+            }
+            server.shutdown().await;
+        }
     }
 
     #[tokio::test]

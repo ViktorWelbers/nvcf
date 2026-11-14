@@ -277,12 +277,13 @@ ignored. Pylon logs the current stats at timeout without reinjecting them.
 Later valid runtime samples continue updating either unpinned distribution.
 
 With both `--do-calibration` and `--initial-input-tps`, Pylon calibrates only
-the first model name, once per start, and installs the measured mean for every
-other model, including models discovered later. The ramp stops after 10 s or at
-a 529 response, like a load-step timeout, and its requests count input tokens
-from the response `usage.prompt_tokens`. If calibration fails or measures no
-input rate, Pylon logs a warning and installs the `--initial-input-tps` value
-for every model. An unhealthy upstream still fails startup.
+the first model name in sorted order, once per start, and installs the measured
+mean for every other model, including models discovered later. The ramp stops
+after 10 s or at a 529 response, like a load-step timeout, and its requests count
+input tokens from the response `usage.prompt_tokens`. If calibration fails or
+measures no input rate, Pylon logs a warning and installs the
+`--initial-input-tps` value for every model. An unhealthy upstream still fails
+startup.
 
 Labels:
 

@@ -237,6 +237,10 @@ impl ModelLifecycleSupervisor {
         fallback_input_tps: f64,
     ) -> Result<f64, ModelLifecycleError> {
         let Some(model_id) = desired.first() else {
+            tracing::warn!(
+                fallback_input_tps,
+                "no model to calibrate at startup; every model starts at the fallback input TPS"
+            );
             return Ok(fallback_input_tps);
         };
         self.reconcile(BTreeSet::from([model_id.clone()])).await?;
