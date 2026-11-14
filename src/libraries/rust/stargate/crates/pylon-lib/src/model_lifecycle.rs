@@ -1727,6 +1727,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn empty_initial_discovery_starts_later_models_at_the_fallback_rate() {
+        let upstream = TestUpstream::spawn(&[], CompletionBehavior::Pending).await;
+        let (runtime_state, stats) = start_test_stats();
+        let subscriber = RecordingTracingSubscriber::default();
+        let dispatch = tracing::Dispatch::new(subscriber.clone());
+        let default_guard = tracing::dispatcher::set_default(&dispatch);
+
+        let lifecycle = start_model_lifecycle(
+            ModelLifecycleConfig {
+                source: discovery_config(&upstream.base_url).source,
+                ..fallback_calibration_config(
+                    &upstream.base_url,
+                    &[],
+                    Duration::from_secs(30),
+                    Duration::from_millis(200),
+                )
+            },
+            runtime_state.clone(),
+            &stats,
+            None,
+        )
+        .await
+        .expect("empty initial discovery should initialize");
+        drop(default_guard);
+
+        let events = subscriber.events();
+        let warning = tracing_event_by_message(
+            &events,
+            "no model to calibrate at startup; every model starts at the fallback input TPS",
+        );
+        assert_eq!(warning.level, tracing::Level::WARN);
+        assert_tracing_event_field(warning, "fallback_input_tps", "100.0");
+
+        upstream.set_models(&["model-a"]).await;
+        wait_for_model_ids(&runtime_state, &["model-a"]).await;
+        assert_eq!(
+            published_input_tps(&runtime_state),
+            BTreeMap::from([("model-a".to_string(), FALLBACK_INPUT_TPS)])
+        );
+
+        lifecycle.shutdown().await;
+        stats.shutdown().await;
+        upstream.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn fallback_calibration_keeps_an_unhealthy_upstream_fatal() {
         let health_probes = Arc::new(AtomicUsize::new(0));
         let server_health_probes = health_probes.clone();

@@ -990,7 +990,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn overload_ends_a_fallback_calibration_and_keeps_the_measured_window() {
+    async fn overload_ends_a_fallback_calibration() {
         for (label, completions, is_measured) in [
             ("529 after completed requests", 3, true),
             ("529 before any completed request", 0, false),
