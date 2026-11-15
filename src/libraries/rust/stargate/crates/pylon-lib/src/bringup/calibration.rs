@@ -13,6 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use futures::stream::{self, StreamExt, TryStreamExt};
@@ -245,6 +246,7 @@ pub(super) async fn send_calibration_batch(
         request_count,
         concurrency,
     } = batch;
+    let prompt_tokens_missing = AtomicBool::new(false);
     let step = stream::iter((0..request_count).map(|_| {
         let request = calibration_request(generation, prompt_units);
         async move {
@@ -262,8 +264,20 @@ pub(super) async fn send_calibration_batch(
         }
     }))
     .buffer_unordered(concurrency.min(request_count))
-    .try_for_each(|_| async { Ok(()) });
-    match tokio::time::timeout(timeout, step).await {
+    .try_for_each(|completion| {
+        if input_tokens_from_usage && !completion.has_prompt_tokens() {
+            prompt_tokens_missing.store(true, Ordering::Relaxed);
+        }
+        async { Ok(()) }
+    });
+    let outcome = tokio::time::timeout(timeout, step).await;
+    if prompt_tokens_missing.load(Ordering::Relaxed) {
+        tracing::info!(
+            model_id = generation.model_id(),
+            "calibration responses have no usage.prompt_tokens; counting prompt characters as input tokens"
+        );
+    }
+    match outcome {
         Ok(outcome) => outcome.map(|()| CalibrationStepOutcome::Completed),
         Err(_) => Ok(CalibrationStepOutcome::Saturated),
     }

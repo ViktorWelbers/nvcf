@@ -1062,6 +1062,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn calibration_without_usage_prompt_tokens_logs_and_counts_characters() {
+        let server = TestHttpServer::spawn(Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { Json(serde_json::json!({"usage": {"completion_tokens": 1}})) }),
+        ))
+        .await;
+        let (runtime_state, observations) = PylonRuntimeState::observed(
+            InferenceServerStatus::Active,
+            &["test-model".to_string()],
+            32,
+            None,
+        );
+        let subscriber = crate::test_support::RecordingTracingSubscriber::default();
+        let dispatch = tracing::Dispatch::new(subscriber.clone());
+        let default_guard = tracing::dispatcher::set_default(&dispatch);
+
+        send_calibration_batch(
+            &reqwest::Client::new(),
+            server.as_str(),
+            &test_generation(),
+            Duration::from_secs(1),
+            CalibrationBatch {
+                prompt_units: CALIBRATION_PROMPT_UNITS_FLOOR,
+                request_count: 2,
+                concurrency: 1,
+            },
+            &runtime_state,
+            true,
+        )
+        .await
+        .expect("calibration batch should succeed");
+        drop(default_guard);
+
+        let completed = observations
+            .try_iter()
+            .last()
+            .expect("calibration request should be observed")
+            .into_observation();
+        assert_eq!(
+            completed.input_tokens,
+            CALIBRATION_PROMPT_UNITS_FLOOR as u64
+        );
+        assert_eq!(
+            subscriber.event_count(
+                "calibration responses have no usage.prompt_tokens; counting prompt characters as input tokens"
+            ),
+            1
+        );
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn fallback_calibration_sends_one_unobserved_warm_up_request_first() {
         for (label, fallback_input_tps, has_warm_up) in [
             ("with a fallback", Some(100.0), true),

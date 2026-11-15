@@ -400,6 +400,12 @@ pub(super) struct ChatCompletionResponse {
     usage: Usage,
 }
 
+impl ChatCompletionResponse {
+    pub(super) fn has_prompt_tokens(&self) -> bool {
+        self.usage.prompt_tokens.is_some()
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct Usage {
     prompt_tokens: Option<u64>,
