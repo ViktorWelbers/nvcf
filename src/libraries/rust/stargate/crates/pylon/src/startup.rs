@@ -22,14 +22,14 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use pylon_lib::{
-    AuthTokenProvider, BringupConfig, CalibrationConfig, CalibrationFallback,
-    EngineStatsStreamConfig, EngineStatsStreamHandle, EngineStatsStreamMode,
-    InferenceServerRegistrationClient, InferenceServerRegistrationConfig, MetricsServerHandle,
-    ModelDiscoveryConfig, ModelInitialization, ModelLifecycleConfig, ModelLifecycleHandle,
-    ModelSource, PylonMetrics, PylonQueueMismatchRetryConfig, PylonRetryConfig, PylonRuntimeState,
-    QuicHttpTunnelConfig, QuicHttpTunnelHandle, RequestQualityMonitorConfig, StatsCollectorConfig,
-    StatsCollectorHandle, TunnelForwardingConfig, UpstreamBackend, UpstreamHealthPaths,
-    start_engine_stats_stream, start_metrics_server, start_model_lifecycle, start_quic_http_tunnel,
+    AuthTokenProvider, BringupConfig, CalibrationConfig, EngineStatsStreamConfig,
+    EngineStatsStreamHandle, EngineStatsStreamMode, InferenceServerRegistrationClient,
+    InferenceServerRegistrationConfig, MetricsServerHandle, ModelDiscoveryConfig,
+    ModelInitialization, ModelLifecycleConfig, ModelLifecycleHandle, ModelSource, PylonMetrics,
+    PylonQueueMismatchRetryConfig, PylonRetryConfig, PylonRuntimeState, QuicHttpTunnelConfig,
+    QuicHttpTunnelHandle, RequestQualityMonitorConfig, StatsCollectorConfig, StatsCollectorHandle,
+    TunnelForwardingConfig, UpstreamBackend, UpstreamHealthPaths, start_engine_stats_stream,
+    start_metrics_server, start_model_lifecycle, start_quic_http_tunnel,
     start_stats_collector_with_engine_stats, stats_aggregator_update_channel,
 };
 use stargate_proto::pb::InferenceServerStatus;
@@ -43,8 +43,6 @@ use super::{Args, OutputTokenCalibrationMode};
 type TaskExit = std::result::Result<(), JoinError>;
 
 const DEFAULT_STARTUP_HEALTH_WAIT: Duration = Duration::from_secs(60);
-// Bounds the registration delay that calibration adds when --initial-input-tps backs it up.
-const FALLBACK_CALIBRATION_TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
 const INFERENCE_READY_TIMEOUT_ENV: &str = "INFERENCE_READY_TIMEOUT";
 
 pub(super) async fn run(args: Args) -> Result<()> {
@@ -807,10 +805,7 @@ fn model_initialization_from_args(args: &Args) -> Result<ModelInitialization> {
             calibration_prompt_units: args.calibration_prompt_units,
             calibration_max_concurrency: args.calibration_max_concurrency,
             calibration_timeout: Duration::from_millis(args.bringup_calibration_timeout_ms),
-            fallback: args.initial_input_tps.map(|input_tps| CalibrationFallback {
-                input_tps,
-                total_timeout: FALLBACK_CALIBRATION_TOTAL_TIMEOUT,
-            }),
+            fallback_input_tps: args.initial_input_tps,
         }));
     }
 
@@ -2112,7 +2107,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn calibration_with_initial_input_tps_seeds_the_first_heartbeat_with_one_measured_rate() {
+    async fn calibration_with_initial_input_tps_seeds_the_first_heartbeat_with_each_measured_rate()
+    {
         let mut upstream = TestUpstream::spawn(false).await;
         let mut control_plane = TestControlPlane::spawn().await;
         let args = runtime_args(
@@ -2142,19 +2138,31 @@ mod tests {
             Some("model-a")
         );
         control_plane.assert_no_calls();
-        upstream.calibration_release.add_permits(5);
+        // One more permit than the calibration-only test, for the warm-up request.
+        upstream.calibration_release.add_permits(6);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), upstream.calibration_started.recv())
+                .await
+                .expect("model-b should calibrate before registration")
+                .as_deref(),
+            Some("model-b")
+        );
+        control_plane.assert_no_calls();
+        upstream.calibration_release.add_permits(6);
 
         let registration = control_plane.first_registration().await;
-        assert_eq!(upstream.calibration_plans.load(Ordering::SeqCst), 1);
-        let input_tps = ["model-a", "model-b"].map(|model_id| {
-            registration.models[model_id]
+        assert_eq!(upstream.calibration_plans.load(Ordering::SeqCst), 2);
+        for model_id in ["model-a", "model-b"] {
+            let input_tps = registration.models[model_id]
                 .stats
                 .as_ref()
                 .expect("first heartbeat should contain stats")
-                .last_mean_input_tps
-        });
-        assert!(input_tps[0].is_finite() && input_tps[0] > 0.0 && input_tps[0] != 100.0);
-        assert_eq!(input_tps[1], input_tps[0]);
+                .last_mean_input_tps;
+            assert!(
+                input_tps.is_finite() && input_tps > 0.0 && input_tps != 100.0,
+                "{model_id}: {input_tps}"
+            );
+        }
 
         startup
             .await

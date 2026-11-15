@@ -49,15 +49,9 @@ pub struct CalibrationConfig {
     pub calibration_prompt_units: usize,
     pub calibration_max_concurrency: usize,
     pub calibration_timeout: Duration,
-    /// Makes calibration best effort: a 529 or `total_timeout` ends the ramp, input
-    /// counts come from response usage, and a failure installs `input_tps` instead.
-    pub fallback: Option<CalibrationFallback>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct CalibrationFallback {
-    pub input_tps: f64,
-    pub total_timeout: Duration,
+    /// Makes calibration best effort: a 529 ends the ramp, input counts come from
+    /// response usage, and a model whose calibration fails starts at this rate.
+    pub fallback_input_tps: Option<f64>,
 }
 
 impl Default for BringupConfig {
@@ -79,7 +73,7 @@ impl Default for CalibrationConfig {
             calibration_prompt_units: DEFAULT_CALIBRATION_PROMPT_UNITS,
             calibration_max_concurrency: DEFAULT_CALIBRATION_MAX_CONCURRENCY,
             calibration_timeout: DEFAULT_CALIBRATION_TIMEOUT,
-            fallback: None,
+            fallback_input_tps: None,
         }
     }
 }
@@ -912,13 +906,6 @@ mod tests {
         stats.shutdown().await;
     }
 
-    fn test_fallback(total_timeout: Duration) -> Option<CalibrationFallback> {
-        Some(CalibrationFallback {
-            input_tps: 100.0,
-            total_timeout,
-        })
-    }
-
     /// Completes `completions` calibration requests, then answers 529 like Dynamo.
     async fn spawn_overloading_server(completions: usize) -> TestHttpServer {
         let remaining = Arc::new(AtomicUsize::new(completions));
@@ -954,8 +941,7 @@ mod tests {
     /// Returns the calibration result and the input TPS it left in the stats.
     async fn run_test_calibration(
         base_url: &str,
-        calibration_timeout: Duration,
-        fallback: Option<CalibrationFallback>,
+        fallback_input_tps: Option<f64>,
     ) -> (Result<(), BringupError>, f64) {
         let (runtime_state, stats) = test_stats_collector();
         let generation = test_generation();
@@ -968,8 +954,7 @@ mod tests {
                 &CalibrationConfig {
                     calibration_requests: 1,
                     calibration_max_concurrency: 1,
-                    calibration_timeout,
-                    fallback,
+                    fallback_input_tps,
                     ..CalibrationConfig::default()
                 },
                 &stats.control(),
@@ -977,7 +962,7 @@ mod tests {
             ),
         )
         .await
-        .expect("calibration should end within its total timeout");
+        .expect("a 529 should end the calibration");
         let input_tps = stats
             .control()
             .flush_and_snapshot(&generation)
@@ -997,12 +982,7 @@ mod tests {
         ] {
             let server = spawn_overloading_server(completions).await;
 
-            let (result, input_tps) = run_test_calibration(
-                server.as_str(),
-                Duration::from_secs(30),
-                test_fallback(Duration::from_secs(30)),
-            )
-            .await;
+            let (result, input_tps) = run_test_calibration(server.as_str(), Some(100.0)).await;
 
             if is_measured {
                 result.unwrap_or_else(|error| panic!("{label}: {error}"));
@@ -1021,42 +1001,10 @@ mod tests {
     async fn overload_still_fails_a_calibration_without_a_fallback() {
         let server = spawn_overloading_server(3).await;
 
-        let (result, _) =
-            run_test_calibration(server.as_str(), Duration::from_secs(30), None).await;
+        let (result, _) = run_test_calibration(server.as_str(), None).await;
 
         assert!(matches!(result, Err(error) if error.is_overloaded()));
         server.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn fallback_calibration_ends_at_its_total_timeout() {
-        for (label, completions, is_measured) in [
-            ("no completed request", 0, false),
-            ("completed requests", 3, true),
-        ] {
-            let base_url = spawn_test_server(TestServerState {
-                completions_before_block: Some(Arc::new(AtomicUsize::new(completions))),
-                ..TestServerState::default()
-            })
-            .await;
-
-            let (result, input_tps) = run_test_calibration(
-                &base_url,
-                Duration::from_secs(30),
-                test_fallback(Duration::from_millis(200)),
-            )
-            .await;
-
-            if is_measured {
-                result.unwrap_or_else(|error| panic!("{label}: {error}"));
-                assert!(input_tps > 0.0, "{label}");
-            } else {
-                assert!(
-                    matches!(result, Err(BringupError::InsufficientCalibrationData)),
-                    "{label}: {result:?}"
-                );
-            }
-        }
     }
 
     #[tokio::test]

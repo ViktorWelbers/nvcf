@@ -44,33 +44,25 @@ pub(crate) async fn run_calibration(
     }
 
     let started_at = Instant::now();
-    let deadline = config
-        .fallback
-        .map(|fallback| tokio::time::Instant::now() + fallback.total_timeout);
     let mut last_completed = None;
     let mut completed_prompt_units = Vec::new();
 
     let mut ramp = calibration_ramp(config);
     while let Some(step) = ramp.next() {
-        let step_timeout = deadline.map_or(config.calibration_timeout, |deadline| {
-            config
-                .calibration_timeout
-                .min(deadline.saturating_duration_since(tokio::time::Instant::now()))
-        });
         let result = send_calibration_batch(
             http_client,
             upstream_http_base_url,
             generation,
-            step_timeout,
+            config.calibration_timeout,
             step,
             runtime_state,
-            config.fallback.is_some(),
+            config.fallback_input_tps.is_some(),
         )
         .await;
         // With a fallback rate, a 529 ends the ramp like a step timeout and keeps
         // the window measured so far.
-        let upstream_overloaded =
-            config.fallback.is_some() && result.as_ref().is_err_and(BringupError::is_overloaded);
+        let upstream_overloaded = config.fallback_input_tps.is_some()
+            && result.as_ref().is_err_and(BringupError::is_overloaded);
         let outcome = if upstream_overloaded {
             Ok(CalibrationStepOutcome::Saturated)
         } else {

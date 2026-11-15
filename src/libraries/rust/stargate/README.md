@@ -27,7 +27,8 @@ when that flag is omitted, a continuously discovered Dynamo `GET /v1/models`
 set. Every Pylon must also select a local stats initialization source:
 `--do-calibration` for a sole Pylon in its cluster or a per-Pylon
 `--initial-input-tps` value for shared-hardware clusters. A sole Pylon can set
-both: it calibrates once and falls back to `--initial-input-tps`. See
+both: it calibrates each model and falls back to `--initial-input-tps` for a
+model whose calibration fails. See
 [Pylon onboarding](docs/operations/pylon-onboarding.md) for the complete
 lifecycle and calibration contract.
 
