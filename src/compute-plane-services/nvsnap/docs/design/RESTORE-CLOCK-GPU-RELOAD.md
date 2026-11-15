@@ -75,7 +75,7 @@ Kimi-K3 rank's GPU load and resume took about 97 s after CRIU (the 2026-10-24 re
 section 1). Another cluster restored a 2-node Kimi-K3.1 rank (826 GB of GPU memory; 2 nodes with 4x GB300
 each, driver 610, 2026-11-14, nvsnap agent v0.2.91-rc8) in 33 s, then waited out the estimate's 130 s at
 the resume: its instance took 153 s, about 95 s of it waiting (the agent's restore phase histograms and the
-two rank nodes' `restore-span-ms` files; [the record](https://github.com/NVIDIA/nvcf/issues/3490)). Every
+two rank nodes' `restore-span-ms` files; [the record](https://github.com/dsx-ai-factory/nvcf/issues/3490)). Every
 first restore of a capture, and every restore on a node new to it, pays that.
 
 So a first restore of a checkpoint on a node also adds its span, with its checkpoint's size, to the
@@ -88,7 +88,7 @@ the checkpoint's estimate: a learned span only shortens the wait, and a cluster 
 shape keeps the estimate. For the rank above, on a node new to it after its first restore elsewhere,
 that is about 50 s instead of 130 s, computed from its numbers by `TestLearnedSpanBudgetKimi`. Measured
 on a 4-node Kimi-K3 instance (4 nodes with 4x GB300 each, 2026-11-15, nvsnap agent v0.2.91-rc15; [the
-record](https://github.com/NVIDIA/nvcf/pull/3491), its Verification section): a first restore with no
+record](https://github.com/dsx-ai-factory/nvcf/pull/3491), its Verification section): a first restore with no
 sample waited about 68 s for its clocks under the estimate's 1m53s budget; the next, on a node new to the
 checkpoint, took the learned span (54.5 s, a 1m5s budget) and waited about 15 s. The ConfigMap is per cluster, so each cluster learns its own nodes
 and fabric. A group restore's driver works the span out once, from its largest rank, and never below a
