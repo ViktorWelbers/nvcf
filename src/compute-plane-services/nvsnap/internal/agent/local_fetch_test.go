@@ -4,6 +4,7 @@
 package agent
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -104,5 +105,31 @@ func TestLocalFetch_DoneFetchDropsTheSourceNodesSpan(t *testing.T) {
 	}
 	if err := endLocalFetch(root, "c2", true); err != nil {
 		t.Errorf("done fetch with no span file: %v", err)
+	}
+}
+
+// TestLocalFetch_KeptSpanStillMarksTheFetchDone: when the source node's
+// span cannot be dropped, the fetch is still done (a refetch would cost far
+// more than one restore budgeted with another node's span), and the error
+// says the span stayed.
+func TestLocalFetch_KeptSpanStillMarksTheFetchDone(t *testing.T) {
+	root := t.TempDir()
+	if err := beginLocalFetch(root, "c1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "c1", "inventory.img"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A directory in the span file's place cannot be removed by os.Remove
+	// while it holds a file.
+	if err := os.MkdirAll(filepath.Join(root, "c1", restoreSpanFile, "x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	err := endLocalFetch(root, "c1", true)
+	if !errors.Is(err, errSourceSpanKept) {
+		t.Fatalf("endLocalFetch = %v, want errSourceSpanKept", err)
+	}
+	if !localCheckpointComplete(root, "c1") {
+		t.Error("the fetch is not marked done; the next restore would fetch the whole checkpoint again")
 	}
 }
