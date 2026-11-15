@@ -375,7 +375,9 @@ func reasonSummary(s string) string {
 	if len(s) <= reasonMax {
 		return s
 	}
-	m := groupFailure.FindStringSubmatch(s)
+	// A member's error can hold a tool's output lines; the patterns match
+	// within one line.
+	m := groupFailure.FindStringSubmatch(strings.ReplaceAll(s, "\n", " "))
 	if m == nil {
 		return truncate(s)
 	}

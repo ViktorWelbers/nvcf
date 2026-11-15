@@ -257,14 +257,29 @@ func killedFromOutside(t *corev1.ContainerStateTerminated) bool {
 // kubeletKillEventsTimeout bounds the read of a pod's events.
 const kubeletKillEventsTimeout = 5 * time.Second
 
-// kubeletKill is why the kubelet killed container of pod, from the pod's
-// events: its latest "Killing" (e.g. "Container main failed liveness
-// probe, will be restarted") and the probe failure before it ("Liveness
-// probe failed: …"); "" when the events say nothing or cannot be read.
-// Exit code 137 alone does not tell a probe's kill from any other SIGKILL.
-func (a *Agent) kubeletKill(ctx context.Context, pod *corev1.Pod, container string) string {
-	if a.kubeClient == nil {
+// killEventSlack is how long after a run's end its kill's event may be
+// stamped: the kubelet records it as it stops the container.
+const killEventSlack = 5 * time.Second
+
+// kubeletKill is why the kubelet killed container of pod in its failed
+// run t, from the pod's events: the "Killing" (e.g. "Container main failed
+// liveness probe, will be restarted") and the probe failure before it
+// ("Liveness probe failed: …") that happened during t, from its start to
+// its end (killEventSlack after it); "" when no event of t says so or the
+// events cannot be read. Exit code 137 alone does not tell a probe's kill
+// from any other SIGKILL, and an earlier run's kill is not t's.
+func (a *Agent) kubeletKill(ctx context.Context, pod *corev1.Pod, container string, t *corev1.ContainerStateTerminated) string {
+	if a.kubeClient == nil || t == nil || t.StartedAt.IsZero() || t.FinishedAt.IsZero() {
 		return ""
+	}
+	during := func(e *corev1.Event) bool {
+		// A repeated event keeps its first and its last time: it belongs to
+		// t when any of it falls in t's run.
+		first, last := e.FirstTimestamp.Time, eventTime(e)
+		if first.IsZero() {
+			first = last
+		}
+		return !last.Before(t.StartedAt.Time) && !first.After(t.FinishedAt.Add(killEventSlack))
 	}
 	ctx, cancel := context.WithTimeout(ctx, kubeletKillEventsTimeout)
 	defer cancel()
@@ -277,7 +292,7 @@ func (a *Agent) kubeletKill(ctx context.Context, pod *corev1.Pod, container stri
 	var killing, unhealthy *corev1.Event
 	for i := range evs.Items {
 		e := &evs.Items[i]
-		if e.InvolvedObject.UID != pod.UID || e.InvolvedObject.FieldPath != fieldPath {
+		if e.InvolvedObject.UID != pod.UID || e.InvolvedObject.FieldPath != fieldPath || !during(e) {
 			continue
 		}
 		switch e.Reason {
@@ -340,7 +355,7 @@ func (c *criuAutoRestorer) considerGPUShareFailure(ctx context.Context, pod *cor
 	// Once per pod: the events say why a SIGKILL came, which its exit code
 	// does not.
 	if name, t, _ := lastFailure(pod); killedFromOutside(t) {
-		if why := c.a.kubeletKill(ctx, pod, name); why != "" {
+		if why := c.a.kubeletKill(ctx, pod, name, t); why != "" {
 			failure += "; " + why
 		}
 	}

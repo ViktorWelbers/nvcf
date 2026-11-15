@@ -754,18 +754,24 @@ func TestConsiderGPUShareFailure_RecordsTheKubeletsKill(t *testing.T) {
 	now := time.Now()
 	for name, tc := range map[string]struct {
 		reason   string
+		started  time.Time // the failed run's start; it ended at now
 		want     string
 		wantNone bool
 	}{
-		"probe kill": {reason: "Error", want: "the kubelet: Container engine failed liveness probe, will be restarted (Liveness probe failed: HTTP probe failed with statuscode: 503)"},
-		"oom kill":   {reason: "OOMKilled", wantNone: true},
+		"probe kill": {reason: "Error", started: now.Add(-time.Minute), want: "the kubelet: Container engine failed liveness probe, will be restarted (Liveness probe failed: HTTP probe failed with statuscode: 503)"},
+		"oom kill":   {reason: "OOMKilled", started: now.Add(-time.Minute), wantNone: true},
+		// The probe killed an earlier run; this run, started after it,
+		// was killed by something else.
+		"an earlier run's kill": {reason: "Error", started: now.Add(30 * time.Second), wantNone: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			a, cs := fallbackAgent(t)
 			c := &criuAutoRestorer{a: a}
 			ctx := context.Background()
 			pod := withLibrary(crashing(enginePod(0), 2, 137))
-			pod.Status.ContainerStatuses[0].LastTerminationState.Terminated.Reason = tc.reason
+			term := pod.Status.ContainerStatuses[0].LastTerminationState.Terminated
+			term.Reason = tc.reason
+			term.StartedAt, term.FinishedAt = metav1.NewTime(tc.started), metav1.NewTime(maxTime(tc.started.Add(time.Second), now.Add(time.Second)))
 			pod.OwnerReferences = []metav1.OwnerReference{ownedBy("ReplicaSet", true)}
 			if _, err := cs.CoreV1().Pods("fn").Create(ctx, pod, metav1.CreateOptions{}); err != nil {
 				t.Fatal(err)
@@ -785,7 +791,7 @@ func TestConsiderGPUShareFailure_RecordsTheKubeletsKill(t *testing.T) {
 			case !strings.Contains(got, "exit code 137"):
 				t.Fatalf("record %q lacks the failure", got)
 			case tc.wantNone && strings.Contains(got, "kubelet"):
-				t.Errorf("record %q names the kubelet for an OOM kill", got)
+				t.Errorf("record %q names the kubelet for a kill that is not this run's probe kill", got)
 			case !tc.wantNone && !strings.HasSuffix(got, "; "+tc.want):
 				t.Errorf("record %q\nwant it to end %q", got, tc.want)
 			}

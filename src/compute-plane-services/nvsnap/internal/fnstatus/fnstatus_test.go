@@ -178,6 +178,10 @@ func TestReasonSummary_SaysWhatFailed(t *testing.T) {
 			"group restore s2: 6 of 6 members failed; ns/ldr-0: restore failed: failed to find placeholder container: ListContainers: rpc error: code = Unavailable desc = connection error",
 		},
 		"short": {"preflight: MPTCP socket", "preflight: MPTCP socket"},
+		"member error with newlines": {
+			"group checkpoint s1: 2 of 2 members failed: " + member("rank-0", "nvsnap-gpu-suspend suspend: exit status 1: pid=7 load: err out of memory\n(command: x)\n"+strings.Repeat("z", 300)) + "; " + member("rank-1", "x"),
+			"group checkpoint s1: 2 of 2 members failed; ns/rank-0: pid=7 load: err out of memory",
+		},
 	}
 	for name, c := range cases {
 		if got := reasonSummary(c.in); got != c.want {
