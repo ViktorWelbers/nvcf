@@ -238,10 +238,103 @@ func gpushareToolEnv(ctx context.Context, hostPID int, env []string, timeout tim
 	var out, errOut bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errOut
 	if err := cmd.Run(); err != nil {
-		return out.String(), fmt.Errorf("%s %s: %w (output: %s)", gpushareToolName, strings.Join(args, " "), err,
-			lastLines(out.String()+errOut.String(), 8))
+		return out.String(), &toolError{args: args, err: err, out: boundOutput(out.String() + errOut.String())}
 	}
 	return out.String(), nil
+}
+
+// toolError is a failed run of nvsnap-gpu-suspend. Its message leads with
+// what failed, every distinct failure line with how often it was printed,
+// so the cause survives the cuts a group record makes (memberFailure keeps
+// a member's first third and its end); then the command and the output's
+// last lines. out, the whole output, is kept with a failed capture's logs
+// (writeToolOutput).
+type toolError struct {
+	args []string
+	err  error
+	out  string
+}
+
+func (e *toolError) Error() string {
+	head := gpushareToolName + " " + toolVerb(e.args) + ": " + e.err.Error()
+	if f := toolFailures(e.out); f != "" {
+		head += ": " + f
+	}
+	return fmt.Sprintf("%s (command: %s %s; output: %s)", head, gpushareToolName, strings.Join(e.args, " "), lastLines(e.out, 8))
+}
+
+func (e *toolError) Unwrap() error { return e.err }
+
+// toolOutputMax bounds the output a toolError keeps.
+const toolOutputMax = 4 << 20
+
+// boundOutput keeps the end of s when it is longer than toolOutputMax.
+func boundOutput(s string) string {
+	if len(s) <= toolOutputMax {
+		return s
+	}
+	return "… " + s[len(s)-toolOutputMax:]
+}
+
+// toolVerb is the tool's command among args: the first that is not a flag
+// or a flag's value.
+func toolVerb(args []string) string {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if strings.HasPrefix(a, "--") {
+			if !strings.Contains(a, "=") && !toolBoolFlags[a] {
+				i++ // its value
+			}
+			continue
+		}
+		return a
+	}
+	return ""
+}
+
+// toolBoolFlags are the tool's flags that take no value.
+var toolBoolFlags = map[string]bool{"--hold-gate": true}
+
+// toolFailureLine is a line of the tool's output that reports a failure:
+// a process's error reply ("pid=1152 quiesce: err busy (…)") or the tool's
+// own account of one.
+var toolFailureLine = regexp.MustCompile(`^pid=\d+ [^:]+: err |failed|cannot |rolling back`)
+
+// toolFailureMax bounds the distinct failure lines toolFailures reports.
+const toolFailureMax = 8
+
+// toolFailures is every distinct failure line of out, in the order first
+// printed, each with how many times it was (a quiesce retried every 250 ms
+// prints the same busy reply hundreds of times); "" when there is none.
+func toolFailures(out string) string {
+	var order []string
+	count := map[string]int{}
+	for _, l := range strings.Split(out, "\n") {
+		l = strings.TrimSpace(l)
+		if l == "" || !toolFailureLine.MatchString(l) {
+			continue
+		}
+		if count[l] == 0 {
+			order = append(order, l)
+		}
+		count[l]++
+	}
+	more := 0
+	if len(order) > toolFailureMax {
+		more = len(order) - toolFailureMax
+		order = order[:toolFailureMax]
+	}
+	parts := make([]string, 0, len(order)+1)
+	for _, l := range order {
+		if n := count[l]; n > 1 {
+			l += fmt.Sprintf(" (%d times)", n)
+		}
+		parts = append(parts, l)
+	}
+	if more > 0 {
+		parts = append(parts, fmt.Sprintf("%d more", more))
+	}
+	return strings.Join(parts, " | ")
 }
 
 // killGroupOnCancel makes the cancel of cmd's context (a deadline, a

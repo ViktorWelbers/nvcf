@@ -208,6 +208,7 @@ go_test(
         "gpushare_store_owner_test.go",
         "gpushare_store_reaper_test.go",
         "gpushare_test.go",
+        "gpushare_tool_error_test.go",
         "group_freeze_test.go",
         "grove_replicas_test.go",
         "instance_clients_test.go",
