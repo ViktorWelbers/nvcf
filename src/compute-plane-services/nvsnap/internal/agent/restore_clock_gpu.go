@@ -315,7 +315,8 @@ func clockThroughGPUSupported(criuHelp, toolUsage string) bool {
 
 // nodeLocalCheckpointFile is whether rel, a path in a checkpoint's
 // directory, is this node's own record rather than part of the checkpoint:
-// the checkpoint manifest leaves it out, and a fetch from a peer skips it.
+// the checkpoint manifest leaves it out, a fetch from a peer skips it, and
+// a done fetch over any tier drops it (endLocalFetch).
 // A copy of another node's restoreSpanFile would make a node new to the
 // checkpoint look restored: it would budget with the other node's span and
 // record no sample of its own.

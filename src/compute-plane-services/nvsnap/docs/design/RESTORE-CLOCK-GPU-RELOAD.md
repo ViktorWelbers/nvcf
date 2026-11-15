@@ -95,8 +95,9 @@ and fabric. A group restore's driver works the span out once, from its largest r
 rank's own last span; each rank bounds it by its own estimate, which for ranks of one instance is about
 the same (`internal/agent/restore_span_learned.go`). Samples come only from first restores on a node,
 the restores that use them, and are written in the background, so a slow API server does not hold a
-rank's report. The span file is the node's own: the checkpoint manifest leaves it out and a fetch from a
-peer skips it, so a node that fetched the checkpoint is still new to it. Should a checkpoint take longer than its learned span, the overrun is counted by the
+rank's report. The span file is the node's own: the checkpoint manifest leaves it out, and a fetch over any
+tier (the rails, a shared filesystem, a peer) drops it when done, so a node that fetched the checkpoint is
+still new to it. Should a checkpoint take longer than its learned span, the overrun is counted by the
 restored clocks; the margin keeps that well under RAS's 60 s for a checkpoint like those of its shape,
 and its own span then makes its next restore right. Sizes are whole checkpoints, so a checkpoint whose
 size is mostly files rather than GPU memory scales less well; the estimate bounds the long side only.
@@ -173,9 +174,10 @@ for which every rank takes the estimate. Companions keep their own budget, which
   another shape; a group's ranks get it from the largest rank and never below a rank's own span
   (`TestLearnedSpan`, `TestRecordAndReadLearnedSpan`, `TestRecordLearnedSpanRetriesConflicts`,
   `TestLearnedGroupSpan`, `TestGroupRestoreSpanBudget`, `TestGroupRestore_LearnedSpanForANewRank`).
-  A node's span file stays its own: the manifest leaves it out and a peer fetch skips it, also from an
-  older peer that lists it (`TestCheckpointManifest_LeavesOutNodeLocalRecords`,
-  `TestEnsureLocal_PeerFetchSkipsNodeLocalRecords`).
+  A node's span file stays its own: the manifest leaves it out, a peer fetch skips it, also from an
+  older peer that lists it, and a done fetch over any tier drops it
+  (`TestCheckpointManifest_LeavesOutNodeLocalRecords`, `TestEnsureLocal_PeerFetchSkipsNodeLocalRecords`,
+  `TestLocalFetch_DoneFetchDropsTheSourceNodesSpan`).
 - **CRIU:** with the new option, the restored clock starts behind by the budget and CRIU returns without
   waiting.
 - **On the cluster:** a Kimi-K3 2-node restore logs no `No available shared memory broadcast block`

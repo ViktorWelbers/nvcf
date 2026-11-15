@@ -64,11 +64,18 @@ func beginLocalFetch(checkpointDir, id string) error {
 }
 
 // endLocalFetch records the fetch's outcome: done, or emptied for the
-// next try.
+// next try. A done fetch first drops what the source node kept of its
+// own (nodeLocalCheckpointFile), whichever tier copied it: the rails and
+// the shared filesystem copy a whole directory, and an older peer still
+// lists its restore span.
 func endLocalFetch(checkpointDir, id string, ok bool) error {
+	dir := filepath.Join(checkpointDir, id)
 	if !ok {
-		_ = clearFiles(filepath.Join(checkpointDir, id))
+		_ = clearFiles(dir)
 		return nil
+	}
+	if err := os.Remove(filepath.Join(dir, restoreSpanFile)); err != nil && !os.IsNotExist(err) { //nolint:gosec // id is one EnsureLocal validated
+		return err
 	}
 	return os.Remove(fetchMarker(checkpointDir, id))
 }
