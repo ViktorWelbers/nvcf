@@ -46,6 +46,9 @@ const (
 	// The first Pylon release that accepts --do-calibration together with
 	// --initial-input-tps. Older Pylons reject the pair at startup.
 	pylonCalibrationMinVersion = "0.31.0"
+	// Each model's calibration ramp ends near three times this batch timeout, so
+	// 3 s keeps the start delay to seconds instead of about 90 s at Pylon's default.
+	pylonCalibrationBatchTimeoutMs = 3000
 
 	llmDirMountPath    = "/var/run/llm"
 	llmWorkerTokenPath = llmDirMountPath + "/worker-token"
@@ -248,7 +251,10 @@ func newLLMRouterClientContainer(
 		"--initial-input-tps=100",
 	}
 	if isPylonCalibrationSupported(llmRouterClientImage) {
-		args = append(args, "--do-calibration")
+		args = append(args,
+			"--do-calibration",
+			fmt.Sprintf("--bringup-calibration-timeout-ms=%d", pylonCalibrationBatchTimeoutMs),
+		)
 	}
 	// NVCF stores 1 when a deployment leaves maxRequestConcurrency unset, so a
 	// value of 1 cannot be told apart from the default. As an engine limit it

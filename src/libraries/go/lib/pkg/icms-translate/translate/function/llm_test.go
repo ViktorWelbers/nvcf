@@ -468,12 +468,12 @@ func TestNewLLMRouterClientContainer_PylonImageTag_GatesCalibration(t *testing.T
 			assert.Contains(t, c.Args, "--initial-input-tps=100")
 			var calibrationArgs []string
 			for _, arg := range c.Args {
-				if strings.HasPrefix(arg, "--do-calibration") {
+				if strings.HasPrefix(arg, "--do-calibration") || strings.HasPrefix(arg, "--bringup-calibration-timeout-ms") {
 					calibrationArgs = append(calibrationArgs, arg)
 				}
 			}
 			if tt.isCalibrationEnabled {
-				assert.Equal(t, []string{"--do-calibration"}, calibrationArgs)
+				assert.Equal(t, []string{"--do-calibration", "--bringup-calibration-timeout-ms=3000"}, calibrationArgs)
 			} else {
 				assert.Empty(t, calibrationArgs)
 			}
