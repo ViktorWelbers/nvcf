@@ -492,6 +492,10 @@ func (a *Agent) fetchFromPeer(ctx context.Context, peerURL string, alternateURLs
 	}
 	tasks := make(chan fetchTask, len(m.Files))
 	for _, f := range m.Files {
+		// An older peer still lists its own node's records.
+		if nodeLocalCheckpointFile(f.Path) {
+			continue
+		}
 		tasks <- fetchTask{path: f.Path, size: f.Size}
 	}
 	close(tasks)

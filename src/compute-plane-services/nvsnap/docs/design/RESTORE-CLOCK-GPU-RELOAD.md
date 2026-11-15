@@ -71,9 +71,12 @@ A restore faster than its budget waits the difference at the resume, before the 
 leaves the overrun counted, as CRIU's budget does today. The recorded span makes the next one right.
 
 **Learned span.** The estimate's rates and slack were set on the slowest cluster seen, where a 2-node
-Kimi-K3 rank's whole restore took 97 s. Another cluster restored a 2-node Kimi-K3.1 rank (826 GB of GPU
-memory) in 33 s, then waited out the estimate's 130 s at the resume: its instance took 153 s, about 95 s
-of it waiting. Every first restore of a capture, and every restore on a node new to it, pays that.
+Kimi-K3 rank's GPU load and resume took about 97 s after CRIU (the 2026-10-24 restore above, its record
+section 1). Another cluster restored a 2-node Kimi-K3.1 rank (826 GB of GPU memory; 2 nodes with 4x GB300
+each, driver 610, 2026-11-14, nvsnap agent v0.2.91-rc8) in 33 s, then waited out the estimate's 130 s at
+the resume: its instance took 153 s, about 95 s of it waiting (the agent's restore phase histograms and the
+two rank nodes' `restore-span-ms` files; [the record](https://github.com/NVIDIA/nvcf/issues/3490)). Every
+first restore of a capture, and every restore on a node new to it, pays that.
 
 So a first restore of a checkpoint on a node also adds its span, with its checkpoint's size, to the
 ConfigMap `nvsnap-restore-spans` in the agent's namespace, keeping the 8 newest of its shape: its GPU
@@ -83,12 +86,17 @@ the largest of its shape's spans, each scaled up to its checkpoint's size when t
 down), plus a fifth for being another checkpoint's, then the usual margin. That budget is never more than
 the checkpoint's estimate: a learned span only shortens the wait, and a cluster with no restore of that
 shape keeps the estimate. For the rank above, on a node new to it after its first restore elsewhere,
-that is about 50 s instead of 130 s. The ConfigMap is per cluster, so each cluster learns its own nodes
+that is about 50 s instead of 130 s, computed from its numbers by `TestLearnedSpanBudgetKimi`. Measured
+on a 4-node Kimi-K3 instance (4 nodes with 4x GB300 each, 2026-11-15, nvsnap agent v0.2.91-rc15; [the
+record](https://github.com/NVIDIA/nvcf/pull/3491), its Verification section): a first restore with no
+sample waited about 68 s for its clocks under the estimate's 1m53s budget; the next, on a node new to the
+checkpoint, took the learned span (54.5 s, a 1m5s budget) and waited about 15 s. The ConfigMap is per cluster, so each cluster learns its own nodes
 and fabric. A group restore's driver works the span out once, from its largest rank, and never below a
 rank's own last span; each rank bounds it by its own estimate, which for ranks of one instance is about
 the same (`internal/agent/restore_span_learned.go`). Samples come only from first restores on a node,
 the restores that use them, and are written in the background, so a slow API server does not hold a
-rank's report. Should a checkpoint take longer than its learned span, the overrun is counted by the
+rank's report. The span file is the node's own: the checkpoint manifest leaves it out and a fetch from a
+peer skips it, so a node that fetched the checkpoint is still new to it. Should a checkpoint take longer than its learned span, the overrun is counted by the
 restored clocks; the margin keeps that well under RAS's 60 s for a checkpoint like those of its shape,
 and its own span then makes its next restore right. Sizes are whole checkpoints, so a checkpoint whose
 size is mostly files rather than GPU memory scales less well; the estimate bounds the long side only.
@@ -104,8 +112,10 @@ until it resumed, and the leader's workload exited before the unlock, which fail
 
 So the driver reads each rank's recorded span from its node's agent (`restore-span-ms`, through the
 checkpoint file endpoint) and hands every rank the same one in the restore request (`groupRestoreSpanMs`):
-the largest, or -1 when a rank has none, for which every rank takes the estimate. Companions keep their
-own budget, which covers CRIU only.
+the largest. When a rank has none, the driver takes the cluster's learned span for the shape of its
+largest rank instead, raised to any rank's own span that is larger (a known span that wins is not marked
+learned), and each rank bounds a learned one by its estimate; only with no learned span either is it -1,
+for which every rank takes the estimate. Companions keep their own budget, which covers CRIU only.
 
 | Part | Change | Owner |
 |---|---|---|
@@ -155,14 +165,17 @@ own budget, which covers CRIU only.
 
 - **Agent:** the budget is the recorded whole span with its margin, falls back to the estimate, and is
   bounded. The span is recorded only for a restore that resumed.
-- **Agent, group restore:** every GPU rank gets the slowest rank's span, or the estimate when any rank
-  has none or its span does not parse; companions get none (`TestGroupRestore_OneClockSpanForTheRanks`,
+- **Agent, group restore:** every GPU rank gets the slowest rank's span; when any rank has none or its
+  span does not parse, the learned span (below), else the estimate; companions get none (`TestGroupRestore_OneClockSpanForTheRanks`,
   `TestGroupRestoreSpanBudget`).
 - **Agent, learned span:** recorded per shape (GPU product and group size), newest 8 kept, conflicts
   retried; the largest scaled up, never down, with its margin, and never past the estimate; none from
   another shape; a group's ranks get it from the largest rank and never below a rank's own span
   (`TestLearnedSpan`, `TestRecordAndReadLearnedSpan`, `TestRecordLearnedSpanRetriesConflicts`,
   `TestLearnedGroupSpan`, `TestGroupRestoreSpanBudget`, `TestGroupRestore_LearnedSpanForANewRank`).
+  A node's span file stays its own: the manifest leaves it out and a peer fetch skips it, also from an
+  older peer that lists it (`TestCheckpointManifest_LeavesOutNodeLocalRecords`,
+  `TestEnsureLocal_PeerFetchSkipsNodeLocalRecords`).
 - **CRIU:** with the new option, the restored clock starts behind by the budget and CRIU returns without
   waiting.
 - **On the cluster:** a Kimi-K3 2-node restore logs no `No available shared memory broadcast block`

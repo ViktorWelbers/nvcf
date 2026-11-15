@@ -43,7 +43,8 @@ import (
 const (
 	// restoreSpanFile, in a checkpoint's directory, holds what its last
 	// restore with a GPU reload took on this node, from CRIU's start to the
-	// GPU resume, in milliseconds.
+	// GPU resume, in milliseconds. It is the node's own: a peer fetching
+	// the checkpoint does not copy it (nodeLocalCheckpointFile).
 	restoreSpanFile = "restore-span-ms"
 	// timensResumePIDsFile is CRIU's list, in its work directory, of the
 	// tasks that ran at the dump, which the agent resumes
@@ -310,6 +311,16 @@ func restoredTasksToResume(procBase string, nsRef, criuNSRef int, pids, skip []i
 func clockThroughGPUSupported(criuHelp, toolUsage string) bool {
 	return criuSupportsTimensBudget(criuHelp) && strings.Contains(criuHelp, "--timens-no-wait") &&
 		strings.Contains(toolUsage, "--clock-at")
+}
+
+// nodeLocalCheckpointFile is whether rel, a path in a checkpoint's
+// directory, is this node's own record rather than part of the checkpoint:
+// the checkpoint manifest leaves it out, and a fetch from a peer skips it.
+// A copy of another node's restoreSpanFile would make a node new to the
+// checkpoint look restored: it would budget with the other node's span and
+// record no sample of its own.
+func nodeLocalCheckpointFile(rel string) bool {
+	return filepath.ToSlash(filepath.Clean(rel)) == restoreSpanFile
 }
 
 // hasRestoreSpan is whether this node has a restore of the checkpoint in
