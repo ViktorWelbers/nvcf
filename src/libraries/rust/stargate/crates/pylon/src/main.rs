@@ -91,7 +91,7 @@ struct Args {
     /// Defaults to INFERENCE_READY_TIMEOUT when set, otherwise 60000
     #[arg(long, value_name = "MS")]
     upstream_health_wait_ms: Option<u64>,
-    /// Run local input-TPS calibration before contacting Stargate. Use only when this is the cluster's sole Pylon. With --initial-input-tps, a 529 ends a model's ramp, and a model whose calibration fails starts at that rate
+    /// Run local input-TPS calibration before contacting Stargate. Use only when this is the cluster's sole Pylon. With --initial-input-tps, each model first sends one unmeasured warm-up request, a 529 ends its ramp, and a model whose calibration fails starts at that rate
     #[arg(long, default_value_t = false)]
     do_calibration: bool,
     /// Bootstrap input TPS for every configured model. With --do-calibration, used only for a model whose calibration fails or measures nothing

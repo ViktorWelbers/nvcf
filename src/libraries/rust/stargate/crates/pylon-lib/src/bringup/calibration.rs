@@ -43,6 +43,16 @@ pub(crate) async fn run_calibration(
         ));
     }
 
+    if config.fallback_input_tps.is_some() {
+        send_warm_up_request(
+            http_client,
+            upstream_http_base_url,
+            generation,
+            config.health_timeout,
+        )
+        .await;
+    }
+
     let started_at = Instant::now();
     let mut last_completed = None;
     let mut completed_prompt_units = Vec::new();
@@ -130,6 +140,37 @@ pub(crate) async fn run_calibration(
     unreachable!("calibration ramp is unbounded and exits only on timeout or error")
 }
 
+/// Sends one request the stats observer does not see, so engine warm-up does not
+/// end the first measured batch. Its calibration request ID also makes the
+/// engine-stats path drop it.
+async fn send_warm_up_request(
+    http_client: &reqwest::Client,
+    upstream_http_base_url: &str,
+    generation: &ModelGeneration,
+    timeout: Duration,
+) {
+    let model_id = generation.model_id();
+    match send_completion_request(
+        http_client,
+        upstream_http_base_url,
+        Some(timeout),
+        &calibration_request(generation, CALIBRATION_PROMPT_UNITS_FLOOR),
+        GeneratedRequestKind::Calibration,
+        generation,
+        None,
+        false,
+    )
+    .await
+    {
+        Ok(_) => tracing::debug!(model_id, "calibration warm-up request completed"),
+        Err(error) => tracing::info!(
+            model_id,
+            error = %error,
+            "calibration warm-up request failed; starting the ramp"
+        ),
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) struct CalibrationBatch {
     pub(super) prompt_units: usize,
@@ -205,13 +246,7 @@ pub(super) async fn send_calibration_batch(
         concurrency,
     } = batch;
     let step = stream::iter((0..request_count).map(|_| {
-        let request = serde_json::json!({
-            "model": generation.model_id(),
-            "messages": [{"role": "user", "content": calibration_prompt(prompt_units)}],
-            "max_tokens": 1,
-            "seed": 33,
-            "stream": false,
-        });
+        let request = calibration_request(generation, prompt_units);
         async move {
             send_completion_request(
                 http_client,
@@ -232,6 +267,16 @@ pub(super) async fn send_calibration_batch(
         Ok(outcome) => outcome.map(|()| CalibrationStepOutcome::Completed),
         Err(_) => Ok(CalibrationStepOutcome::Saturated),
     }
+}
+
+fn calibration_request(generation: &ModelGeneration, prompt_units: usize) -> serde_json::Value {
+    serde_json::json!({
+        "model": generation.model_id(),
+        "messages": [{"role": "user", "content": calibration_prompt(prompt_units)}],
+        "max_tokens": 1,
+        "seed": 33,
+        "stream": false,
+    })
 }
 
 /// Builds a `prompt_units`-character calibration prompt that starts with a

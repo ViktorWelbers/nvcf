@@ -277,12 +277,14 @@ ignored. Pylon logs the current stats at timeout without reinjecting them.
 Later valid runtime samples continue updating either unpinned distribution.
 
 With both `--do-calibration` and `--initial-input-tps`, Pylon calibrates each
-model in the same order, one at a time, including models discovered later. A
-529 response ends a model's ramp like a load-step timeout, and its requests
-count input tokens from the response `usage.prompt_tokens`. If a model's
-calibration fails or measures no input rate, Pylon logs a warning and starts
-that model at the `--initial-input-tps` value. An unhealthy upstream still fails
-startup.
+model, one at a time, including models discovered later. Before each ramp, it
+sends one warm-up request with the `--bringup-canary-timeout-ms` timeout. That
+request does not count toward the rate, so engine warm-up does not end the
+first batch. A 529 response ends a model's ramp like a load-step timeout
+(`--bringup-calibration-timeout-ms`), and ramp requests count input tokens from
+the response `usage.prompt_tokens`. If a model's calibration fails or measures
+no input rate, Pylon logs a warning and starts that model at the
+`--initial-input-tps` value. An unhealthy upstream still fails startup.
 
 Labels:
 
