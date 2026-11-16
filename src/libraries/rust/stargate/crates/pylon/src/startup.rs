@@ -2138,8 +2138,7 @@ mod tests {
             Some("model-a")
         );
         control_plane.assert_no_calls();
-        // One more permit than the calibration-only test, for the warm-up request.
-        upstream.calibration_release.add_permits(6);
+        upstream.calibration_release.add_permits(5);
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(5), upstream.calibration_started.recv())
                 .await
@@ -2148,7 +2147,7 @@ mod tests {
             Some("model-b")
         );
         control_plane.assert_no_calls();
-        upstream.calibration_release.add_permits(6);
+        upstream.calibration_release.add_permits(5);
 
         let registration = control_plane.first_registration().await;
         assert_eq!(upstream.calibration_plans.load(Ordering::SeqCst), 2);

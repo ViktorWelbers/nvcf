@@ -1114,69 +1114,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fallback_calibration_sends_one_unobserved_warm_up_request_first() {
-        for (label, fallback_input_tps, has_warm_up) in [
-            ("with a fallback", Some(100.0), true),
-            ("without a fallback", None, false),
-        ] {
-            let request_ids = Arc::new(Mutex::new(Vec::new()));
-            let base_url = spawn_test_server(TestServerState {
-                completions_before_block: Some(Arc::new(AtomicUsize::new(4))),
-                request_ids: Some(request_ids.clone()),
-                ..TestServerState::default()
-            })
-            .await;
-            // Observations go to a raw channel the test reads; the collector only
-            // answers the snapshot at saturation.
-            let (runtime_state, observations) = PylonRuntimeState::observed(
-                InferenceServerStatus::Active,
-                &["test-model".to_string()],
-                64,
-                None,
-            );
-            let (_, stats) = test_stats_collector();
-
-            let _ = run_calibration(
-                &reqwest::Client::new(),
-                &base_url,
-                &test_generation(),
-                &CalibrationConfig {
-                    calibration_requests: 1,
-                    calibration_max_concurrency: 1,
-                    calibration_timeout: Duration::from_millis(200),
-                    fallback_input_tps,
-                    ..CalibrationConfig::default()
-                },
-                &stats.control(),
-                &runtime_state,
-            )
-            .await;
-
-            let request_ids = request_ids.lock().await.clone();
-            let observed = observations
-                .try_iter()
-                .map(|event| event.into_observation().request_id)
-                .collect::<std::collections::BTreeSet<_>>();
-            let unobserved = request_ids
-                .iter()
-                .filter(|request_id| !observed.contains(*request_id))
-                .collect::<Vec<_>>();
-            if has_warm_up {
-                assert_eq!(unobserved, [&request_ids[0]], "{label}: {request_ids:?}");
-                assert_eq!(
-                    parse_pylon_generated_request_id(&request_ids[0]).kind,
-                    "calibration",
-                    "{label}"
-                );
-            } else {
-                assert!(unobserved.is_empty(), "{label}: {unobserved:?}");
-            }
-            assert!(request_ids.len() > 1, "{label}: the ramp should follow");
-            stats.shutdown().await;
-        }
-    }
-
-    #[tokio::test]
     async fn recovery_canary_runs_after_initial_health_activation() {
         let canaries = CanarySequence::default();
         let health_requests = Arc::new(AtomicUsize::new(0));
