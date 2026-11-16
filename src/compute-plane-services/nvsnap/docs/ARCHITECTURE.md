@@ -283,7 +283,25 @@ is a group record: a ConfigMap naming every member's checkpoint
    ordinal and the group size; `internal/webhook/criu_group.go`). A member that
    cannot restore with its instance starts cold; the instance's other
    placeholders then cannot restore together, and are deleted once the restore
-   stalls (section 10).
+   stalls (section 10). A member also starts cold when its process
+   configuration differs from its checkpoint's: the command, args, image,
+   working directory and environment of the container it was captured from,
+   as admission received them. The configuration hash an instance is found
+   by leaves some of these out so that roles and ranks share one model
+   download, and a restored process keeps what it was captured with, not
+   what the new pod sets. The webhook stamps each pod with digests of these
+   fields (`nvsnap.io/process-config`), the capture keeps the captured
+   container's per member (GPU ranks and companions) in the group record,
+   and the log names the fields that differ
+   (`internal/webhook/process_config.go`). Placement env a controller sets
+   (`GROVE_*`, the rank variables, `LWS_LEADER_ADDRESS`) is left out, since
+   replicas differ in it and the rank is matched by ordinal; the namespace's
+   name is normalized in env values. A member whose fields do not fit its
+   share of the record is kept as one digest (`criu_group.go`
+   `recordProcessConfig`): a change still starts it cold, but the log cannot
+   name the field. A record from before the stamp holds none and restores as
+   before. A change inside a ConfigMap or Secret that `env` or `envFrom`
+   names is not seen; only the reference is.
 2. The leader's agent restores every member with one address map for the whole
    instance and its connections locked. The GPU ranks go first: each reloads
    its GPU memory, exchanging fabric handles with the others, before it reports

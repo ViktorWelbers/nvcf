@@ -15,6 +15,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
@@ -64,6 +65,10 @@ type CRIUGroup struct {
 	// ahead of its pod's args, as JSON (ColdEntrypointMeta). Empty for
 	// none recorded.
 	ColdEntrypoints []string
+	// ProcessConfigs holds, by slot, each GPU rank's process
+	// configuration as its pod was admitted (ProcessConfig). Empty for
+	// none recorded: a capture from before it was.
+	ProcessConfigs []string
 	// VerifyNamespace, when set, is the only namespace that may restore
 	// from the capture: the instance stopped for it, whose restore
 	// verifies it. Empty once a restore has succeeded.
@@ -141,6 +146,15 @@ func (m *Mutator) criuGroupRestorePatches(ctx context.Context, pod *corev1.Pod) 
 				return nil
 			}
 		}
+		// Before a slot is claimed; the slots are identical companions,
+		// one template's replicas, so the first speaks for all.
+		if s := slots[0]; s < len(g.ProcessConfigs) {
+			if changed := ProcessConfigChanges(g.ProcessConfigs[s], ProcessConfig(pod)); len(changed) > 0 {
+				log.WithFields(logrus.Fields{"slot": s, "changed": strings.Join(changed, ", ")}).
+					Info("CRIU group restore: the companion's process configuration differs from its checkpoint's, which the restored process would keep; cold start")
+				return nil
+			}
+		}
 	} else {
 		if name := NamesOwnInstance(pod); name != "" && !m.dynamoRestorable(pod) {
 			log.WithField("env", name).Info("CRIU group restore: the pod names its own instance in its configuration; it starts from the caches")
@@ -154,6 +168,16 @@ func (m *Mutator) criuGroupRestorePatches(ctx context.Context, pod *corev1.Pod) 
 				Info("CRIU group restore: the capture is of a different instance size; cold start")
 			admit(metrics.AdmitCold, "size-mismatch")
 			return nil
+		}
+		// The restored process keeps the configuration it was captured
+		// with (process_config.go).
+		if ordinal < len(g.ProcessConfigs) {
+			if changed := ProcessConfigChanges(g.ProcessConfigs[ordinal], ProcessConfig(pod)); len(changed) > 0 {
+				log.WithFields(logrus.Fields{"ordinal": ordinal, "changed": strings.Join(changed, ", ")}).
+					Info("CRIU group restore: the pod's process configuration differs from its checkpoint's, which the restored process would keep; cold start")
+				admit(metrics.AdmitCold, "config-changed")
+				return nil
+			}
 		}
 		// Only an instance of several ranks waits for all of them; one
 		// pod restores alone whatever its controller.
@@ -230,6 +254,7 @@ func (m *Mutator) criuGroupRestorePatches(ctx context.Context, pod *corev1.Pod) 
 		return nil
 	}
 	cp = append(cp, newMetaPatcher(pod).annotation(CacheURIAnnotation, uri)...)
+	cp = append(cp, m.processConfigPatches(pod)...)
 	log.WithFields(logrus.Fields{"checkpoint": id, "ordinal": ordinal, "size": size}).Info("CRIU group restore: pod admitted as its rank's restore placeholder")
 	admit(metrics.AdmitRestore, "")
 	return mergePatchPlan(withPIDReserve(pod, append(cp, vp...)))

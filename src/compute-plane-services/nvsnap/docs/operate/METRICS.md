@@ -164,7 +164,8 @@ What is measured:
   nodes' drivers keep CRIU off, a pod of any configuration counted,
   [CRIU-CAPTURE-FALLBACK.md](../design/CRIU-CAPTURE-FALLBACK.md#28-gpu-drivers-criu-cannot-serve-on)) or `cold` (reason:
   `size-mismatch`, `not-restorable-as-group`, `checkpoint-blocked`,
-  `own-instance`, `prepare-failed`, `model-unavailable`). A pod of a
+  `own-instance`, `config-changed`: the pod's process configuration differs
+  from its checkpoint's, `prepare-failed`, `model-unavailable`). A pod of a
   configuration with no capture is not counted. The agents add `missed`:
   a rank of an instance the webhook never mutated (reason `not-admitted`:
   the API server admitted it unchanged, as its failure policy lets it when
