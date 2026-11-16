@@ -17,7 +17,7 @@ use super::keys::{RegistrationIdentity, RoutingTargetKey};
 use super::*;
 use parking_lot::RwLock;
 use std::collections::{HashMap, hash_map::Entry};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::tunnel::RegistrationConnections;
 
@@ -62,6 +62,18 @@ struct ActiveRegistrationCluster {
 #[derive(Debug, Default)]
 pub(super) struct RegistrationClusterGeneration {
     retired: AtomicBool,
+    pub(super) capacity: CapacityDomain,
+}
+
+/// Engine load of one capacity domain, `(routing_key, cluster_id)`, shared
+/// by every model name it serves. Pylon counts each request under exactly one
+/// name, so the sum over names is the engine's running count.
+#[derive(Debug, Default)]
+pub(super) struct CapacityDomain {
+    // Sum of the running counts that each routed target state last reported.
+    reported_running: AtomicU64,
+    // Reservations routed under any name and not yet settled.
+    pending_reservations: AtomicU64,
 }
 
 #[derive(Debug)]
@@ -138,6 +150,35 @@ impl RegistrationClusterGeneration {
 
     pub(super) fn is_retired(&self) -> bool {
         self.retired.load(Ordering::Acquire)
+    }
+}
+
+impl CapacityDomain {
+    /// Running requests on the engine: reported by its backends, plus
+    /// requests routed to it that no backend has reported yet.
+    pub(super) fn running_queries(&self) -> u64 {
+        self.reported_running
+            .load(Ordering::Acquire)
+            .saturating_add(self.pending_reservations.load(Ordering::Acquire))
+    }
+
+    /// Replaces one routed target state's share of the reported running
+    /// count. `share` holds that state's last published value.
+    pub(super) fn replace_reported_running(&self, share: &mut u64, running: u64) {
+        // Bounding each share keeps the shared sum from wrapping, so every
+        // share can later be subtracted exactly.
+        let running = running.min(u64::from(u32::MAX));
+        self.reported_running.fetch_add(running, Ordering::AcqRel);
+        self.reported_running.fetch_sub(*share, Ordering::AcqRel);
+        *share = running;
+    }
+
+    pub(super) fn reservation_started(&self) {
+        self.pending_reservations.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub(super) fn reservation_ended(&self) {
+        self.pending_reservations.fetch_sub(1, Ordering::AcqRel);
     }
 }
 

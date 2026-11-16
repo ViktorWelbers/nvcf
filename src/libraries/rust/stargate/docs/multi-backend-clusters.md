@@ -68,6 +68,8 @@ Backend-summed fields:
 - `output_tps`
 - `queue_size`
 - `queued_input_size`
+- `num_running_queries`
+- `total_query_input_size`
 - `input_processing_queries`
 - `output_generation_queries`
 - `stats_capabilities`
@@ -77,10 +79,12 @@ Cluster latest-wins fields:
 
 - `max_output_tps`
 - KV capacity/used/free tokens
-- `num_running_queries`
 - `max_engine_concurrency`
-- `total_query_input_size`
-- `queue_time_estimate_ms_by_priority`
+
+`queue_time_estimate_ms_by_priority` is the input-rate-weighted mean of the
+backend estimates for each priority, bounded by the lowest and highest backend
+estimate. A backend with queued work but no valid input rate or estimate
+clears the cluster map.
 
 - `last_mean_input_tps` is the sum of active backend reports.
 - `max_input_tps` is the greatest active backend generation maximum, available
@@ -114,6 +118,31 @@ the same authoritative runtime snapshot with every discovered Stargate.
 
 Latest-wins uses Stargate receive time and only active backend snapshots. If the
 source backend disappears, recompute from remaining active snapshots.
+
+## Capacity Domain Across Model Names
+
+A `(routing_key, cluster_id)` scope is one capacity domain: every model name
+its Pylons serve runs on the same engine. Pylon counts each request under
+exactly one name, so the engine's running count is the sum over names.
+
+The `num_running_queries` that load balancers read for a model is the
+domain's count, not the model's own:
+
+- running requests that the domain's Pylons last reported, summed over every
+  model name and every Pylon
+- plus requests routed under any of those names that no Pylon has reported
+  yet
+
+Admission compares that count with the requested model's own
+`max_engine_concurrency`, plus `max_queued`. A function that lists several
+names for one backend therefore gets one budget, not one per name. Distinct
+models behind one Pylon also share the budget, because Pylon gets one
+`--max-engine-concurrency` for all names. Queue sizes, input sizes, and
+priority queue estimates stay per model.
+
+Stargate enforces this budget. Pylon still counts each name separately for its
+own queue estimate; that estimate can only be lower than Stargate's, so Pylon's
+queue mismatch check does not reject more requests.
 
 ## Load Balancers
 

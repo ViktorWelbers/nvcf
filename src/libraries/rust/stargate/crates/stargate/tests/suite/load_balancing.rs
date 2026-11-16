@@ -22,9 +22,9 @@ use std::time::Duration;
 
 use crate::common::{
     assert_all_probes_routed_to, direct_registration_config, init_crypto,
-    make_stargate_runtime_with_lb, start_dummy_inst, wait_for_inference_server_ids,
-    wait_for_routing, wait_for_routing_with_cache_affinity, with_proxy_headers,
-    with_proxy_headers_cache_affinity, with_proxy_headers_input_tokens,
+    make_stargate_runtime_with_lb, start_dummy_inst, start_dummy_inst_with_models,
+    wait_for_inference_server_ids, wait_for_routing, wait_for_routing_with_cache_affinity,
+    with_proxy_headers, with_proxy_headers_cache_affinity, with_proxy_headers_input_tokens,
 };
 use pylon_lib::{
     CurrentModelStats, InferenceServerRegistrationClient, InferenceServerRegistrationConfig,
@@ -1592,6 +1592,78 @@ async fn wait_and_widen_capacity_rejection_returns_overloaded_error() {
     );
 
     stop_backends(&mut backends);
+    stargate.shutdown().await;
+}
+
+// Model names served by one backend share its engine limit: with the engine
+// full from requests on one name, a request on another name is rejected at
+// admission instead of reaching the backend.
+#[tokio::test]
+async fn wait_and_widen_rejects_alias_when_backend_is_full_on_another_name() {
+    let base = "shared-engine-base";
+    let alias = "shared-engine-alias";
+    let stargate = RunningStargate::start(
+        "test-sg-shared-engine",
+        Some(r#"{"default":"wait-and-widen"}"#),
+    )
+    .await;
+    let model_ids = [base.to_string(), alias.to_string()];
+    let (upstream_addr, inference_server_url, _tunnel) =
+        start_dummy_inst_with_models(base, &model_ids).await;
+    let runtime = PylonRuntimeState::new(InferenceServerStatus::Active, &model_ids);
+    let mut config = direct_registration_config(
+        vec![stargate.grpc_addr.to_string()],
+        "shared-engine-inst",
+        inference_server_url,
+        format!("http://{upstream_addr}"),
+        runtime.clone(),
+    );
+    config.min_update_interval = Duration::from_millis(50);
+    let mut registration = InferenceServerRegistrationClient::default();
+    registration.start(config).expect("registration failed");
+    for (model, num_running_queries) in [(base, 1), (alias, 0)] {
+        runtime.set_model_stats(
+            model,
+            CurrentModelStats {
+                last_mean_input_tps: 1000.0,
+                num_running_queries,
+                max_engine_concurrency: Some(1),
+                ..CurrentModelStats::default()
+            },
+        );
+    }
+
+    let state = stargate.handle.state();
+    let target = RoutingTargetKey {
+        routing_key: None,
+        model_id: base.to_string(),
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let candidates = state.candidates_for_target(&target).await;
+        if candidates.len() == 1 && candidates[0].stats.num_running_queries >= 1 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "full backend snapshot did not arrive: {candidates:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let response = ChatRequests::new(stargate.http_addr, alias)
+        .request("req-shared-engine-alias")
+        .send()
+        .await
+        .expect("request failed");
+
+    assert_eq!(response.status(), 503);
+    assert_eq!(
+        response_header(&response, "x-stargate-error-code"),
+        "overloaded_error"
+    );
+
+    registration.stop();
     stargate.shutdown().await;
 }
 

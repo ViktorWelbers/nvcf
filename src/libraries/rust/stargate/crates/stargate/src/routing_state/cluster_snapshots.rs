@@ -341,6 +341,12 @@ impl ClusterRoutingGeneration {
         });
     }
 
+    fn reported_running_queries(&self) -> u64 {
+        self.snapshot_state
+            .as_ref()
+            .map_or(0, |state| state.base_snapshot.stats.num_running_queries)
+    }
+
     fn routing_snapshot(&mut self) -> Option<RoutedClusterSnapshot> {
         let snapshot_state = self.snapshot_state.as_mut()?;
         // Reservations end only by backend update, release, or removal, so a
@@ -435,7 +441,15 @@ impl RoutedClusterState {
         let mut generation = self.generation.lock();
         let upsert = generation.upsert_backend(backend);
         generation.refresh_snapshot(Some(&updated_backend_id));
+        self.publish_capacity_share(&mut generation);
         upsert
+    }
+
+    fn publish_capacity_share(&self, generation: &mut ClusterRoutingGeneration) {
+        let running = generation.reported_running_queries();
+        self.cluster_generation
+            .capacity
+            .replace_reported_running(&mut generation.capacity_share, running);
     }
 
     pub(super) fn remove_backend(
@@ -447,6 +461,7 @@ impl RoutedClusterState {
             return ClusterBackendRemoval::Missing;
         }
         generation.refresh_snapshot(None);
+        self.publish_capacity_share(&mut generation);
         if generation.backends.is_empty() {
             ClusterBackendRemoval::Emptied
         } else {
@@ -455,14 +470,28 @@ impl RoutedClusterState {
     }
 
     pub(super) fn routing_snapshot(&self) -> Option<RoutedClusterSnapshot> {
-        self.generation.lock().routing_snapshot()
+        let mut snapshot = self.generation.lock().routing_snapshot()?;
+        // Every model name in the capacity domain runs on the same engine, so
+        // admission sees the domain's running count; other stats stay per name.
+        // The domain bounds each share, so this name's own count stays the
+        // floor and a saturated report stays saturated.
+        snapshot.stats.num_running_queries = snapshot
+            .stats
+            .num_running_queries
+            .max(self.cluster_generation.capacity.running_queries());
+        Some(snapshot)
     }
 
     /// Settles pending reservations when a retired generation leaves its
     /// routing target. In-flight selections can keep this state alive past
     /// the TTL, so clearing the snapshot also refuses new reservations.
     pub(super) fn detach(&self) {
-        let snapshot_state = self.generation.lock().snapshot_state.take();
+        let snapshot_state = {
+            let mut generation = self.generation.lock();
+            let snapshot_state = generation.snapshot_state.take();
+            self.publish_capacity_share(&mut generation);
+            snapshot_state
+        };
         for pending in snapshot_state
             .into_iter()
             .flat_map(|state| state.pending_cluster_reservations)
@@ -573,5 +602,16 @@ impl RoutedClusterState {
     #[cfg(test)]
     pub(super) fn backend_aggregate(&self) -> Option<(ModelStats, Duration, usize)> {
         self.generation.lock().backend_aggregate()
+    }
+}
+
+impl Drop for RoutedClusterState {
+    // A target state can leave its routing target without a detach, so its
+    // share of the domain's running count leaves with it.
+    fn drop(&mut self) {
+        let generation = self.generation.get_mut();
+        self.cluster_generation
+            .capacity
+            .replace_reported_running(&mut generation.capacity_share, 0);
     }
 }

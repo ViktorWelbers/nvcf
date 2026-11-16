@@ -3638,3 +3638,112 @@ async fn shared_cluster_selects_active_backends_round_robin() {
         .expect("remaining backend should be selected");
     assert_eq!(selected.inference_server_id, "inst-b");
 }
+
+// Model names advertised by one backend share its engine slots, so load on
+// one name, whether reported by the backend or still in flight, fills the
+// slot for every name.
+#[tokio::test]
+async fn alias_names_on_one_backend_share_engine_slots() {
+    use stargate_protocol::common::has_available_engine_slot;
+
+    for (case, base_running, reserve_on_base) in [
+        ("in-flight reservation on base", 0, true),
+        ("reported running request on base", 1, false),
+    ] {
+        let scenario = RegistrationScenario::new(Some("rk-alias"));
+        let running = scenario.start("inst-alias", 8888);
+        let stats = |num_running_queries| ModelStats {
+            last_mean_input_tps: 100.0,
+            max_engine_concurrency: 1,
+            num_running_queries,
+            ..ModelStats::default()
+        };
+        let mut update = scenario.update(&running, "base", Active, stats(base_running));
+        update.models.insert(
+            "alias".to_string(),
+            InferenceServerModelRegistration {
+                stats: Some(stats(0)),
+                status: Active as i32,
+            },
+        );
+        scenario.publish_connected(&running, &update).await;
+
+        let _held = if reserve_on_base {
+            Some(
+                scenario
+                    .selected_cluster("base")
+                    .await
+                    .reserve_backend(&running.generation(), 10, 0)
+                    .expect("active backend should accept reservation"),
+            )
+        } else {
+            None
+        };
+
+        for model in ["base", "alias"] {
+            let stats = scenario.only_cluster(model).await.stats;
+            assert!(
+                !has_available_engine_slot(stats.num_running_queries, stats.max_engine_concurrency),
+                "{case}: {model} still sees a free slot: running={} max={}",
+                stats.num_running_queries,
+                stats.max_engine_concurrency
+            );
+        }
+    }
+}
+
+// The shared count must fall back when load on one name ends, or the domain
+// would stay full for every name.
+#[tokio::test]
+async fn alias_names_on_one_backend_free_engine_slots_when_load_ends() {
+    use stargate_protocol::common::has_available_engine_slot;
+
+    for (case, base_running, reserve_on_base) in [
+        ("released reservation on base", 0, true),
+        ("reported running request on base ends", 1, false),
+    ] {
+        let scenario = RegistrationScenario::new(Some("rk-alias"));
+        let running = scenario.start("inst-alias", 8888);
+        let stats = |num_running_queries| ModelStats {
+            last_mean_input_tps: 100.0,
+            max_engine_concurrency: 1,
+            num_running_queries,
+            ..ModelStats::default()
+        };
+        let update_with = |base_running| {
+            let mut update = scenario.update(&running, "base", Active, stats(base_running));
+            update.models.insert(
+                "alias".to_string(),
+                InferenceServerModelRegistration {
+                    stats: Some(stats(0)),
+                    status: Active as i32,
+                },
+            );
+            update
+        };
+        scenario
+            .publish_connected(&running, &update_with(base_running))
+            .await;
+
+        if reserve_on_base {
+            scenario
+                .selected_cluster("base")
+                .await
+                .reserve_backend(&running.generation(), 10, 0)
+                .expect("active backend should accept reservation")
+                .release();
+        } else {
+            scenario.publish_connected(&running, &update_with(0)).await;
+        }
+
+        for model in ["base", "alias"] {
+            let stats = scenario.only_cluster(model).await.stats;
+            assert!(
+                has_available_engine_slot(stats.num_running_queries, stats.max_engine_concurrency),
+                "{case}: {model} has no free slot: running={} max={}",
+                stats.num_running_queries,
+                stats.max_engine_concurrency
+            );
+        }
+    }
+}
