@@ -4,6 +4,7 @@ include Makefile.dist
 .PHONY: test test-published-charts test-nats-chart
 test:
 	@tests/custom-observability-environment.sh
+	@tests/release-inventory-coverage.sh
 	@tests/llm-gateway-auth-transport.sh
 	@tests/llm-router-worker-address.sh
 	@tests/llm-router-split-cluster.sh
@@ -35,6 +36,7 @@ test:
 	@tests/image-override-wiring.sh
 	@tests/sidecar-registry-wiring.sh
 	@tests/api-env-wiring.sh
+	@tests/account-bootstrap-wiring.sh
 	@tests/apikeys-env-wiring.sh
 	@tests/notary-env-wiring.sh
 	@tests/ess-base-url-wiring.sh
