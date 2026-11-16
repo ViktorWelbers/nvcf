@@ -146,6 +146,11 @@ Rules:
 4. Pylon `queue_estimate_mismatch` before upstream execution fails only the
    rejecting backend first.
 5. After cluster failure, rerun load balancing without failed clusters.
+6. If a `queue_estimate_mismatch` leaves no untried backend and no untried
+   cluster, resend the request once to the same backend without
+   `x-stargate-expected-queue-ms`. Pylon admits a request without an
+   estimate. The resend counts as a request retry with reason
+   `queue_mismatch_resend_without_estimate`.
 
 ## Validation Rules
 

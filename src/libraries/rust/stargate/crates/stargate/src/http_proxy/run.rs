@@ -67,6 +67,10 @@ pub(super) struct ProxyRequestRun<'a> {
     failed_cluster_ids: HashSet<String>,
     pub(super) attempt_counters: ProxyAttemptCounters,
     pub(super) last_attempt_capacity_rejected: bool,
+    /// The backend a queue-mismatch rejection was resent to without an
+    /// expected queue time because no other backend was left. Set at most
+    /// once per request.
+    pub(super) queue_mismatch_resend_to: Option<String>,
     routing_capacity_rejected: bool,
 }
 
@@ -87,6 +91,7 @@ impl<'a> ProxyRequestRun<'a> {
             failed_cluster_ids: HashSet::new(),
             attempt_counters: ProxyAttemptCounters::default(),
             last_attempt_capacity_rejected: false,
+            queue_mismatch_resend_to: None,
             routing_capacity_rejected: false,
         }
     }

@@ -3423,8 +3423,10 @@ async fn backend_errors_on_every_instance_stop_at_the_retry_limits() {
     }
 }
 
+/// Pylon rejects with a queue mismatch while it holds unreported work. With no
+/// other backend left, Stargate resends without an estimate and Pylon admits it.
 #[tokio::test]
-async fn queue_mismatch_single_backend_returns_overload() {
+async fn queue_mismatch_single_backend_resends_without_an_estimate() {
     let mut fixture = ProxyFixture::start("test-sg-queue-exhaust").await;
     let model = "queue-exhaust-model";
     let runtime = active_runtime(model);
@@ -3446,24 +3448,24 @@ async fn queue_mismatch_single_backend_returns_overload() {
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
-        response.headers()["x-stargate-error-code"],
-        "overloaded_error"
+        backend.hits(),
+        1,
+        "only the admitted resend reaches the engine"
     );
-    assert!(
-        response.headers().keys().all(
-            |name| name == "x-stargate-error-code" || !name.as_str().starts_with("x-stargate-")
-        )
-    );
-    let body: serde_json::Value = response.json().await.unwrap();
-    assert_eq!(body["error"]["code"], "overloaded_error");
-    assert_eq!(backend.hits(), 0);
+    let metrics = fixture.metrics();
     assert_metric_sample(
-        &fixture.metrics(),
-        r#"stargate_proxy_retry_exhausted_total{model="queue-exhaust-model",reason="no_eligible_backend",routing_key=""} 1"#,
+        &metrics,
+        r#"stargate_proxy_retries_total{model="queue-exhaust-model",reason="queue_mismatch_resend_without_estimate",routing_key=""} 1"#,
         true,
-        "queue rejection should exhaust the only destination",
+        "the resend to the only backend should be counted",
+    );
+    assert_metric_sample(
+        &metrics,
+        r#"stargate_proxy_retry_exhausted_total{model="queue-exhaust-model",reason="no_eligible_backend",routing_key=""}"#,
+        false,
+        "the only backend should not be exhausted",
     );
     fixture.shutdown().await;
 }

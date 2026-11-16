@@ -62,11 +62,22 @@ enum MockReply {
         headers: &'static [(&'static str, &'static str)],
     },
     ResetStream,
+    /// Pylon's admission rule: reject with a queue mismatch only when the
+    /// request carries an expected queue time, otherwise answer 200.
+    MismatchWhenEstimated,
 }
 
 const OK_REPLY: MockReply = MockReply::Respond {
     status: 200,
     headers: &[],
+};
+
+const QUEUE_MISMATCH_REPLY: MockReply = MockReply::Respond {
+    status: 429,
+    headers: &[
+        (HEADER_STARGATE_RETRYABLE, "true"),
+        (HEADER_STARGATE_RETRY_REASON, "queue_estimate_mismatch"),
+    ],
 };
 
 /// Raw QUIC tunnel endpoint standing in for Pylon. It records every request
@@ -163,6 +174,15 @@ async fn serve_stream(
     let Ok(request_headers) = recv.recv_header().await else {
         return;
     };
+    let reply = match reply {
+        MockReply::MismatchWhenEstimated
+            if request_headers.contains_key(HEADER_STARGATE_EXPECTED_QUEUE_MS) =>
+        {
+            QUEUE_MISMATCH_REPLY
+        }
+        MockReply::MismatchWhenEstimated => OK_REPLY,
+        reply => reply,
+    };
     received.lock().push(request_headers);
     let (status, extra_headers) = match reply {
         MockReply::ResetStream => {
@@ -170,6 +190,7 @@ async fn serve_stream(
             return;
         }
         MockReply::Respond { status, headers } => (status, headers),
+        MockReply::MismatchWhenEstimated => unreachable!("resolved from the request headers"),
     };
     while let Ok(frame) = recv.recv_body().await {
         if frame.into_body().is_none() {
@@ -243,11 +264,22 @@ async fn register_backend(
     tunnel: &MockTunnel,
     rtt: Duration,
 ) -> RunningRegistration {
+    register_backend_in(app, CLUSTER, inference_server_id, tunnel, rtt).await
+}
+
+/// Registers one active direct backend in `cluster_id`.
+async fn register_backend_in(
+    app: &ProxyAppState,
+    cluster_id: &str,
+    inference_server_id: &str,
+    tunnel: &MockTunnel,
+    rtt: Duration,
+) -> RunningRegistration {
     let running = app
         .state
         .begin_registration(&RegistrationIdentity {
             inference_server_id: inference_server_id.to_string(),
-            cluster_id: CLUSTER.to_string(),
+            cluster_id: cluster_id.to_string(),
             inference_server_url: tunnel.url(),
             routing_key: None,
             reverse_tunnel: false,
@@ -279,23 +311,42 @@ async fn report_idle(app: &ProxyAppState, running: &RunningRegistration, rtt: Du
 }
 
 async fn send_request(app: &ProxyAppState, request_id: &str) -> Result<HeaderMap, StatusCode> {
-    let request = Request::builder()
+    let (status, headers, _) = send_request_with_headers(app, request_id, &[]).await;
+    if status.is_success() {
+        Ok(headers)
+    } else {
+        Err(status)
+    }
+}
+
+/// Sends a chat request with extra headers and reads the whole response body.
+async fn send_request_with_headers(
+    app: &ProxyAppState,
+    request_id: &str,
+    extra_headers: &[(&str, &str)],
+) -> (StatusCode, HeaderMap, bytes::Bytes) {
+    let mut request = Request::builder()
         .method(Method::POST)
         .uri(OpenAiProxyEndpoint::CHAT_COMPLETIONS.path)
         .header(HEADER_REQUEST_ID, request_id)
         .header(HEADER_MODEL, MODEL)
-        .header(HEADER_INPUT_TOKENS, INPUT_TOKENS.to_string())
+        .header(HEADER_INPUT_TOKENS, INPUT_TOKENS.to_string());
+    for (name, value) in extra_headers {
+        request = request.header(*name, *value);
+    }
+    let request = request
         .body(Body::from("{}"))
         .expect("request should build");
     let response =
         proxy_openai_request(app.clone(), request, OpenAiProxyEndpoint::CHAT_COMPLETIONS)
             .await
             .into_response();
-    if response.status().is_success() {
-        Ok(response.headers().clone())
-    } else {
-        Err(response.status())
-    }
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .expect("response body should complete");
+    (status, headers, body)
 }
 
 /// Reservations currently counted in the routed cluster snapshot. Base stats
@@ -556,6 +607,13 @@ async fn assert_reply_keeps_reservations(reply: MockReply, case: &str) {
         attempts >= 1,
         "{case}: the backend should receive a dispatch"
     );
+    assert!(
+        tunnel
+            .expected_queue_ms_headers()
+            .iter()
+            .all(Option::is_some),
+        "{case}: only a queue-mismatch rejection may resend without an estimate"
+    );
     assert_eq!(
         counted_reservations(&app).await,
         attempts as u64,
@@ -617,13 +675,7 @@ async fn non_queue_mismatch_failures_keep_reservation_until_ttl() {
 #[tokio::test]
 async fn queue_mismatch_rejection_releases_reservation_before_ttl() {
     let app = proxy_app(UNEXPIRING_TTL, UNEXPIRING_TTL);
-    let tunnel = MockTunnel::start(MockReply::Respond {
-        status: 429,
-        headers: &[
-            (HEADER_STARGATE_RETRYABLE, "true"),
-            (HEADER_STARGATE_RETRY_REASON, "queue_estimate_mismatch"),
-        ],
-    });
+    let tunnel = MockTunnel::start(QUEUE_MISMATCH_REPLY);
     let running = register_backend(&app, "inst-a", &tunnel, Duration::from_millis(10)).await;
 
     for request_id in ["req-mismatch-1", "req-mismatch-2"] {
@@ -631,11 +683,225 @@ async fn queue_mismatch_rejection_releases_reservation_before_ttl() {
     }
 
     assert_eq!(counted_reservations(&app).await, 0);
+    // Each request is resent once without an estimate to the only backend.
     assert_eq!(
         tunnel.expected_queue_ms_headers(),
-        [Some(BASE_QUEUE_MS), Some(BASE_QUEUE_MS)],
+        [Some(BASE_QUEUE_MS), None, Some(BASE_QUEUE_MS), None],
         "a released reservation must not inflate the next estimate"
     );
 
     app.state.end_registration(running).await;
+}
+
+#[tokio::test]
+async fn queue_mismatch_on_the_only_backend_resends_without_an_estimate() {
+    let app = proxy_app(UNEXPIRING_TTL, UNEXPIRING_TTL);
+    let tunnel = MockTunnel::start(MockReply::MismatchWhenEstimated);
+    let running = register_backend(&app, "inst-a", &tunnel, Duration::from_millis(10)).await;
+
+    let (status, _, body) = send_request_with_headers(&app, "req-last-backend", &[]).await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Pylon admits the resend that carries no estimate"
+    );
+    assert_eq!(&body[..], b"{}", "the admitted response body completes");
+    assert_eq!(
+        tunnel.expected_queue_ms_headers(),
+        [Some(BASE_QUEUE_MS), None]
+    );
+    assert_eq!(
+        counted_reservations(&app).await,
+        1,
+        "the admitted resend stays reserved until the backend reports"
+    );
+    let retries = |reason| app.metrics.proxy_retries_total(None, MODEL, reason).get();
+    assert_eq!(retries("queue_mismatch_resend_without_estimate"), 1);
+    assert_eq!(
+        retries("queue_estimate_mismatch"),
+        0,
+        "the resend is counted under its own reason"
+    );
+
+    app.state.end_registration(running).await;
+}
+
+#[tokio::test]
+async fn queue_mismatch_is_final_when_the_retry_budget_is_spent() {
+    let app = proxy_app(UNEXPIRING_TTL, UNEXPIRING_TTL);
+    let tunnel = MockTunnel::start(MockReply::MismatchWhenEstimated);
+    let running = register_backend(&app, "inst-a", &tunnel, Duration::from_millis(10)).await;
+
+    let (status, _, _) =
+        send_request_with_headers(&app, "req-no-budget", &[("x-stargate-max-wait-ms", "0")]).await;
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(tunnel.expected_queue_ms_headers(), [Some(BASE_QUEUE_MS)]);
+
+    app.state.end_registration(running).await;
+}
+
+/// Asserts that one backend saw a single attempt with an estimate and the
+/// other saw an attempt with an estimate and then the resend without one.
+fn assert_resent_only_to_the_last_backend(first: &MockTunnel, second: &MockTunnel) {
+    let carried_estimate = |tunnel: &MockTunnel| -> Vec<bool> {
+        tunnel
+            .expected_queue_ms_headers()
+            .iter()
+            .map(Option::is_some)
+            .collect()
+    };
+    let mut seen = [carried_estimate(first), carried_estimate(second)];
+    seen.sort_by_key(Vec::len);
+    assert_eq!(
+        seen,
+        [vec![true], vec![true, false]],
+        "each backend is tried with an estimate before the last one is resent without it"
+    );
+}
+
+#[tokio::test]
+async fn queue_mismatch_resends_to_the_last_sibling_after_every_sibling_rejected() {
+    let app = proxy_app(UNEXPIRING_TTL, UNEXPIRING_TTL);
+    let first = MockTunnel::start(MockReply::MismatchWhenEstimated);
+    let second = MockTunnel::start(MockReply::MismatchWhenEstimated);
+    let rtt = Duration::from_millis(10);
+    let a = register_backend(&app, "inst-a", &first, rtt).await;
+    let b = register_backend(&app, "inst-b", &second, rtt).await;
+
+    send_request(&app, "req-siblings-rejected")
+        .await
+        .expect("the last sibling admits the resend without an estimate");
+
+    assert_resent_only_to_the_last_backend(&first, &second);
+
+    app.state.end_registration(a).await;
+    app.state.end_registration(b).await;
+}
+
+#[tokio::test]
+async fn queue_mismatch_resends_to_the_last_cluster_after_every_cluster_rejected() {
+    let app = proxy_app(UNEXPIRING_TTL, UNEXPIRING_TTL);
+    let first = MockTunnel::start(MockReply::MismatchWhenEstimated);
+    let second = MockTunnel::start(MockReply::MismatchWhenEstimated);
+    let rtt = Duration::from_millis(10);
+    let a = register_backend_in(&app, "cluster-a", "inst-a", &first, rtt).await;
+    let b = register_backend_in(&app, "cluster-b", "inst-b", &second, rtt).await;
+
+    send_request(&app, "req-clusters-rejected")
+        .await
+        .expect("the last cluster admits the resend without an estimate");
+
+    assert_resent_only_to_the_last_backend(&first, &second);
+
+    app.state.end_registration(a).await;
+    app.state.end_registration(b).await;
+}
+
+#[tokio::test]
+async fn queue_mismatch_resend_without_an_estimate_happens_once() {
+    let app = proxy_app(UNEXPIRING_TTL, UNEXPIRING_TTL);
+    let tunnel = MockTunnel::start(QUEUE_MISMATCH_REPLY);
+    let running = register_backend(&app, "inst-a", &tunnel, Duration::from_millis(10)).await;
+
+    let status = send_request(&app, "req-always-rejected")
+        .await
+        .expect_err("a backend that keeps rejecting fails the request");
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        tunnel.expected_queue_ms_headers(),
+        [Some(BASE_QUEUE_MS), None]
+    );
+
+    app.state.end_registration(running).await;
+}
+
+#[tokio::test]
+async fn queue_mismatch_is_final_when_no_request_retries_are_allowed() {
+    let mut app = proxy_app(UNEXPIRING_TTL, UNEXPIRING_TTL);
+    app.retry.max_request_retries = 0;
+    let tunnel = MockTunnel::start(MockReply::MismatchWhenEstimated);
+    let running = register_backend(&app, "inst-a", &tunnel, Duration::from_millis(10)).await;
+
+    let status = send_request(&app, "req-no-retries")
+        .await
+        .expect_err("without request retries a mismatch is final");
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(tunnel.expected_queue_ms_headers(), [Some(BASE_QUEUE_MS)]);
+
+    app.state.end_registration(running).await;
+}
+
+#[tokio::test]
+async fn queue_mismatch_tries_a_sibling_backend_with_its_estimate() {
+    let app = proxy_app(UNEXPIRING_TTL, UNEXPIRING_TTL);
+    let rejecting = MockTunnel::start(QUEUE_MISMATCH_REPLY);
+    let serving = MockTunnel::start(OK_REPLY);
+    let rtt = Duration::from_millis(10);
+    let a = register_backend(&app, "inst-a", &rejecting, rtt).await;
+    let b = register_backend(&app, "inst-b", &serving, rtt).await;
+
+    // Round robin reaches the rejecting backend within two requests.
+    for request_id in ["req-sibling-1", "req-sibling-2"] {
+        send_request(&app, request_id)
+            .await
+            .expect("the sibling backend serves the request");
+    }
+
+    assert!(rejecting.request_count() >= 1);
+    assert_eq!(serving.request_count(), 2);
+    for tunnel in [&rejecting, &serving] {
+        assert!(
+            tunnel
+                .expected_queue_ms_headers()
+                .iter()
+                .all(Option::is_some),
+            "no attempt is sent without an estimate while a sibling is left"
+        );
+    }
+
+    app.state.end_registration(a).await;
+    app.state.end_registration(b).await;
+}
+
+#[tokio::test]
+async fn queue_mismatch_tries_another_cluster_with_its_estimate() {
+    let app = proxy_app(UNEXPIRING_TTL, UNEXPIRING_TTL);
+    let rejecting = MockTunnel::start(QUEUE_MISMATCH_REPLY);
+    let serving = MockTunnel::start(OK_REPLY);
+    let rtt = Duration::from_millis(10);
+    let a = register_backend_in(&app, "cluster-a", "inst-a", &rejecting, rtt).await;
+    let b = register_backend_in(&app, "cluster-b", "inst-b", &serving, rtt).await;
+
+    for request_id in [
+        "req-cluster-1",
+        "req-cluster-2",
+        "req-cluster-3",
+        "req-cluster-4",
+    ] {
+        send_request(&app, request_id)
+            .await
+            .expect("the other cluster serves the request");
+    }
+
+    assert!(
+        rejecting.request_count() >= 1,
+        "the rejecting cluster must be tried for the test to cover the retry"
+    );
+    assert_eq!(serving.request_count(), 4);
+    for tunnel in [&rejecting, &serving] {
+        assert!(
+            tunnel
+                .expected_queue_ms_headers()
+                .iter()
+                .all(Option::is_some),
+            "no attempt is sent without an estimate while another cluster is left"
+        );
+    }
+
+    app.state.end_registration(a).await;
+    app.state.end_registration(b).await;
 }

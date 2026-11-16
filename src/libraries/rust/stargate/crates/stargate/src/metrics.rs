@@ -31,6 +31,11 @@ use tracing::{error, info};
 
 pub const DEFAULT_PREFIX: &str = "stargate_";
 
+/// `proxy_retries_total` reason for a request resent to its last backend
+/// without an expected queue time after a queue-mismatch rejection.
+pub(crate) const RETRY_REASON_QUEUE_MISMATCH_RESEND: &str =
+    "queue_mismatch_resend_without_estimate";
+
 macro_rules! define_stargate_metrics {
     (
         counters { $($counter:ident($counter_name:literal, $counter_help:literal, [$($counter_label:literal),*]);)* }
@@ -245,6 +250,10 @@ impl StargateMetrics {
         self.active_inference_servers
             .with_label_values(&[routing_key.unwrap_or(""), model])
             .set(count.try_into().unwrap_or(i64::MAX));
+        // Routing key and model are dynamic, so the resend series starts at
+        // zero once a target is published.
+        self.proxy_retries_total(routing_key, model, RETRY_REASON_QUEUE_MISMATCH_RESEND)
+            .inc_by(0);
     }
 }
 
@@ -353,6 +362,21 @@ mod tests {
         assert!(
             !body.contains("stargate_requests_total"),
             "default stargate prefix leaked into custom metric output:\n{body}"
+        );
+    }
+
+    #[test]
+    fn queue_mismatch_resend_retries_start_at_zero_for_an_active_target() {
+        let metrics = StargateMetrics::new().expect("metrics should initialize");
+
+        metrics.set_active_inference_servers(Some("routing-a"), "model-a", 1);
+
+        let body = metrics.gather_text().expect("metrics should encode");
+        assert!(
+            body.contains(
+                r#"stargate_proxy_retries_total{model="model-a",reason="queue_mismatch_resend_without_estimate",routing_key="routing-a"} 0"#
+            ),
+            "resend retry counter should start at zero:\n{body}"
         );
     }
 

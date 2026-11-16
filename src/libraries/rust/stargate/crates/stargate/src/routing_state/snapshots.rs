@@ -129,6 +129,15 @@ impl SelectedRoutedCluster {
         self.owner.select_backend(failed_backend_ids)
     }
 
+    pub(crate) fn has_untried_backend(
+        &self,
+        failed_backend_ids: &HashSet<String>,
+        current_backend_id: &str,
+    ) -> bool {
+        self.owner
+            .has_untried_backend(failed_backend_ids, current_backend_id)
+    }
+
     #[cfg(test)]
     pub(crate) fn reserve_backend(
         &self,

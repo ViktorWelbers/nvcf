@@ -488,6 +488,19 @@ impl RoutedClusterState {
             .collect()
     }
 
+    /// Whether a backend other than `current_backend_id` and the failed ones
+    /// remains, without advancing the round-robin position.
+    pub(super) fn has_untried_backend(
+        &self,
+        failed_backend_ids: &HashSet<String>,
+        current_backend_id: &str,
+    ) -> bool {
+        self.generation.lock().backends.iter().any(|backend| {
+            backend.inference_server_id != current_backend_id
+                && !failed_backend_ids.contains(&backend.inference_server_id)
+        })
+    }
+
     pub(super) fn select_backend(
         &self,
         failed_backend_ids: &HashSet<String>,

@@ -80,6 +80,31 @@ impl ProxyRequestRun<'_> {
         self.request.request_inputs.target.model_id.as_str()
     }
 
+    fn expected_queue_ms(
+        &self,
+        selected: &SelectedClusterRun,
+        chosen: &RoutedInferenceServerSnapshot,
+    ) -> Option<u64> {
+        if self.queue_mismatch_resend_to.as_deref() == Some(chosen.inference_server_id.as_str()) {
+            None
+        } else {
+            selected.expected_queue_ms
+        }
+    }
+
+    /// Whether a queue-mismatch rejection from `chosen` leaves no sibling
+    /// backend and no other cluster to try.
+    async fn is_last_backend(
+        &mut self,
+        selected: &SelectedClusterRun,
+        chosen: &RoutedInferenceServerSnapshot,
+    ) -> bool {
+        !selected
+            .cluster
+            .has_untried_backend(&self.failed_backend_ids, &chosen.inference_server_id)
+            && !self.has_untried_cluster(&chosen.cluster_id).await
+    }
+
     pub(super) async fn run_proxy_attempt(
         &mut self,
         selected: &SelectedClusterRun,
@@ -145,19 +170,17 @@ impl ProxyRequestRun<'_> {
             );
         record_proxy_attempt_start(self, selected, chosen);
 
-        let upstream_span = proxy_upstream_attempt_span(self, selected, chosen);
+        let expected_queue_ms = self.expected_queue_ms(selected, chosen);
+        let upstream_span = proxy_upstream_attempt_span(self, selected, chosen, expected_queue_ms);
         Span::current().record(
             "proxy.queue.expected_ms",
-            selected.expected_queue_ms.unwrap_or_default() as i64,
+            expected_queue_ms.unwrap_or_default() as i64,
         );
-        Span::current().record(
-            "proxy.queue.expected_present",
-            selected.expected_queue_ms.is_some(),
-        );
+        Span::current().record("proxy.queue.expected_present", expected_queue_ms.is_some());
         let attempt_headers = headers_for_upstream_attempt(
             &self.request.forwarded_headers,
             &upstream_span,
-            selected.expected_queue_ms,
+            expected_queue_ms,
         );
         let upstream_start = Instant::now();
         let mut request_body_started = false;
@@ -258,6 +281,19 @@ impl ProxyRequestRun<'_> {
             return finish_attempt(self, chosen, disposition, Ok(upstream));
         }
         let (outcome, retry_reason, message) = match retry {
+            UpstreamRetry::AlternateBackend(_)
+                if self.queue_mismatch_resend_to.is_none()
+                    && self.is_last_backend(selected, chosen).await =>
+            {
+                // Pylon admits a request without an expected queue time, so
+                // the only backend queues it instead of the caller seeing 503.
+                self.queue_mismatch_resend_to = Some(chosen.inference_server_id.clone());
+                (
+                    ProxyAttemptOutcome::RetrySameBackend(Arc::clone(chosen)),
+                    crate::metrics::RETRY_REASON_QUEUE_MISMATCH_RESEND.to_string(),
+                    "resending request to the last backend without a queue estimate after local queue mismatch",
+                )
+            }
             UpstreamRetry::AlternateBackend(reason) => (
                 ProxyAttemptOutcome::RetryAlternateBackend(chosen.inference_server_id.clone()),
                 reason,
@@ -339,6 +375,7 @@ fn proxy_upstream_attempt_span(
     run: &ProxyRequestRun<'_>,
     selected: &SelectedClusterRun,
     chosen: &RoutedInferenceServerSnapshot,
+    expected_queue_ms: Option<u64>,
 ) -> Span {
     tracing::info_span!(
         "proxy_upstream_http_request",
@@ -349,8 +386,8 @@ fn proxy_upstream_attempt_span(
         selected_cluster.id = %chosen.cluster_id,
         selected_inst.id = %chosen.inference_server_id,
         routing.algorithm = %selected.routing_algorithm,
-        proxy.queue.expected_ms = selected.expected_queue_ms.map(|value| value as i64).unwrap_or_default(),
-        proxy.queue.expected_present = selected.expected_queue_ms.is_some(),
+        proxy.queue.expected_ms = expected_queue_ms.map(|value| value as i64).unwrap_or_default(),
+        proxy.queue.expected_present = expected_queue_ms.is_some(),
         proxy.upstream_status = field::Empty,
         proxy.error = field::Empty,
         proxy.time_to_first_byte_ms = field::Empty,
@@ -633,6 +670,82 @@ mod tests {
         let mut inputs = parse_proxy_request_inputs(&headers).unwrap();
         inputs.target = target;
         inputs
+    }
+
+    /// After the last backend was resent a request without an estimate, a
+    /// failover to a backend that appeared since must still carry one.
+    #[tokio::test]
+    async fn only_the_backend_resent_after_a_queue_mismatch_skips_the_estimate() {
+        let app = test_proxy_app_state();
+        let target = RoutingTargetKey::new(None, "model-a");
+        let identity = RegistrationIdentity {
+            inference_server_id: "backend-a".to_string(),
+            cluster_id: "cluster-a".to_string(),
+            inference_server_url: "quic://127.0.0.1:5001".to_string(),
+            routing_key: None,
+            reverse_tunnel: true,
+        };
+        let registration = app.state.begin_registration(&identity).unwrap();
+        let update = stargate_proto::pb::InferenceServerRegistration {
+            inference_server_id: identity.inference_server_id.clone(),
+            cluster_id: identity.cluster_id.clone(),
+            inference_server_url: identity.inference_server_url.clone(),
+            models: std::collections::HashMap::from([(
+                target.model_id.clone(),
+                stargate_proto::pb::InferenceServerModelRegistration {
+                    stats: Some(ModelStats::default()),
+                    status: InferenceServerStatus::Active.into(),
+                },
+            )]),
+            reverse_tunnel: true,
+        };
+        app.state
+            .apply_registration_update(
+                &registration,
+                &update,
+                true,
+                Some(Duration::from_millis(10)),
+            )
+            .await;
+        let resolution = app
+            .lb_router
+            .resolve_algorithm_override(&target.model_id, None)
+            .unwrap();
+        let mut selected = super::super::run::SelectedClusterRun::new(
+            app.state
+                .routing_target_snapshot(&target)
+                .await
+                .expect("registered backend should produce a target snapshot"),
+            resolution.selection(LoadBalancerCandidateChoice::with_rank_depth_1(0)),
+            0,
+        );
+        selected.expected_queue_ms = Some(123);
+        let resent = selected
+            .cluster
+            .select_backend(&std::collections::HashSet::new())
+            .expect("registered backend should be selectable");
+        let mut newcomer = resent.as_ref().clone();
+        newcomer.inference_server_id = "backend-b".to_string();
+        let request = PreparedProxyRequest {
+            lb_resolution: resolution,
+            request_inputs: chat_request_inputs(target),
+            endpoint_name: "chat_completions",
+            method: Method::POST,
+            path_and_query: "/v1/chat/completions".to_string(),
+            forwarded_headers: HeaderMap::new(),
+            retry_deadline: None,
+            request_start: Instant::now(),
+            replay_body: ReplayableRequestBody::new(&HeaderMap::new(), Body::empty(), 1024)
+                .unwrap(),
+        };
+        let mut run = ProxyRequestRun::new(&app, request);
+        assert_eq!(run.expected_queue_ms(&selected, &resent), Some(123));
+
+        run.queue_mismatch_resend_to = Some("backend-a".to_string());
+
+        assert_eq!(run.expected_queue_ms(&selected, &resent), None);
+        assert_eq!(run.expected_queue_ms(&selected, &newcomer), Some(123));
+        app.state.end_registration(registration).await;
     }
 
     #[test]

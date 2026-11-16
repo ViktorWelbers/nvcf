@@ -249,7 +249,9 @@ Pylon may return retryable `429` with
 By default it does so only when its local queue estimate exceeds Stargate's by
 at least 10 s and at least 4 times (`--pylon-queue-mismatch-min-delta-ms`,
 `--pylon-queue-mismatch-tolerance-factor`). Stargate's estimate lags behind
-Pylon's under load, so smaller differences are expected.
+Pylon's under load, so smaller differences are expected. When the rejection
+leaves no other backend or cluster to try, Stargate resends the request once to
+the same backend without `x-stargate-expected-queue-ms`, which Pylon admits.
 
 Pylon marks a model server error retryable from the response head, before any
 output reaches Stargate. By default it marks `529` and `503`
