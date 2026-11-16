@@ -73,7 +73,11 @@ for mode in bridge versioned; do
         fi
     else
         grep -q 'jwt-plugin-lifecycle wait-ready' "$rendered"
-        grep -q 'Rotate member' "$rendered"
+        grep -q 'JWT member check: failed to verify' "$rendered"
+        if grep -q 'Rotate member\|Required upgrade stop:' "$rendered"; then
+            echo 'Member checks must not infer a bridge migration from a verification failure' >&2
+            exit 1
+        fi
         grep -q 'jwt-plugin-lifecycle deployment-preflight' "$rendered"
         migrations="$test_root/migrations.yaml"
         yq 'select(.kind == "Job" and .metadata.name == "openbao-server-migrations")' "$rendered" > "$migrations"
