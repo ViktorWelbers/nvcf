@@ -504,10 +504,19 @@ func clockWaited(out string) time.Duration {
 	return w
 }
 
+// gpushareQuiesceTimeout is how long a suspend tries to quiesce the GPU
+// work of every pid (and, in a group, of every node) before it gives up
+// and rolls back. The tool measures it in wall-clock time; across nodes the
+// vote driver ends the session at it (driveFabric VoteDeadline). An
+// attempt that finds a pid busy takes about 2 to 4 s (the library waits
+// 2 s for the work to drain, then the nodes vote), so this is 30 to 60
+// attempts.
+const gpushareQuiesceTimeout = 2 * time.Minute
+
 // gpushareSuspendArgs builds the suspend command line. fabricDir, when set,
 // joins a multi-node session (--fabric-map, see gpushare_fabric.go).
 func gpushareSuspendArgs(store, fabricDir string, pids []int) []string {
-	args := []string{"--timeout-ms", "120000", "--store", store, "--ckpt-dir", store}
+	args := []string{"--timeout-ms", strconv.FormatInt(gpushareQuiesceTimeout.Milliseconds(), 10), "--store", store, "--ckpt-dir", store}
 	if fabricDir != "" {
 		args = append(args, "--fabric-map", fabricDir)
 	}

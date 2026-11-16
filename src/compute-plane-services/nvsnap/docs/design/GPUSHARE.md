@@ -232,7 +232,8 @@ That agent starts each member's checkpoint on its node with a new session id.
 Each member's agent creates a fresh session directory in the pod's store,
 passes it as `--fabric-map`, and serves it at
 `/v1/gpushare/fabric/<session>/<namespace>/<pod>`. The driving agent answers
-each vote round (`go` once every member is quiesced, `retry` otherwise) and,
+each vote round (`go` once every member is quiesced, `retry` otherwise,
+`abort` once the vote cannot pass in time) and,
 once every member has written its handle list, delivers the concatenated lists
 to all of them, once. A fresh directory per session means a list from an
 earlier cycle is never merged.
@@ -337,7 +338,15 @@ Limits of the move:
   node) coordinates the nodes through whoever drives them:
   - Quiesce vote: each attempt, the tool writes `DIR/q` (`<attempt> ok` or
     `<attempt> busy`) and waits for `DIR/d`; once every node has voted the
-    driver writes `<attempt> go` if all are quiesced, else `<attempt> retry`.
+    driver writes `<attempt> go` if all are quiesced, else `<attempt> retry`,
+    or `<attempt> abort` once the session cannot succeed: a member ended, or
+    the vote has not gone 2 minutes after the first vote
+    (`internal/agent/gpushare.go` `gpushareQuiesceTimeout`). The tool rolls
+    back on `abort`, so every node stops at the same attempt. Its own
+    `--timeout-ms` deadline is wall-clock time, a minute later with
+    `--fabric-map`, for a driver that never answers; an attempt that finds a
+    pid busy takes 2 s or more, so a count of attempts would overshoot it many
+    times over.
   - Handle exchange: after `load`, the tool writes its new fabric handles to
     `DIR/out` and waits for `DIR/in` (all nodes' `out` files concatenated) to
     re-import from at `remap`. The driver must remove `DIR/out` and `DIR/in`

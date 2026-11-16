@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""nvsnap-gpu-suspend gives up a quiesce that never succeeds on time.
+
+No GPU: the tool is built against a stub libcuda.so.1, and a fake workload
+answers its control socket the way libnvsnap_gpushare does under steady
+traffic ("quiesce: err busy (GPU work did not drain)", after waiting up to
+2 s for the work to drain). The test checks that
+
+  * the --timeout-ms deadline is wall-clock time, not a count of attempts:
+    an attempt takes far longer than the 250 ms pause between attempts;
+  * with --fabric-map, an "abort" verdict from the vote driver ends the
+    suspend at once, rather than counting as a retry.
+
+Run: python3 -I tests/gpushare/host/test_quiesce_deadline.py
+(CUDA_INC names the directory with cuda.h; default /usr/local/cuda/include.)
+"""
+
+import os
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unittest
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SRC = os.path.normpath(os.path.join(HERE, "../../../docker/agent/gpushare"))
+CUDA_INC = os.environ.get("CUDA_INC", "/usr/local/cuda/include")
+
+STUB = r"""
+typedef int CUresult;
+CUresult cuInit(unsigned f) { (void)f; return 0; }
+CUresult cuGetErrorName(CUresult r, const char **s) { (void)r; *s = "stub"; return 0; }
+#define STUB_FN(n) CUresult n(void) { return 0; }
+STUB_FN(cuCheckpointProcessLock)
+STUB_FN(cuCheckpointProcessCheckpoint)
+STUB_FN(cuCheckpointProcessRestore)
+STUB_FN(cuCheckpointProcessUnlock)
+STUB_FN(cuCheckpointProcessGetState)
+STUB_FN(cuCheckpointProcessGetRestoreThreadId)
+"""
+
+# How long the fake workload takes to answer "quiesce busy": the library
+# waits up to 2 s for GPU work to drain before it says so.
+BUSY_REPLY_S = 0.6
+
+
+def build(tmp):
+    with open(os.path.join(tmp, "stub.c"), "w") as f:
+        f.write(STUB)
+    subprocess.run(["gcc", "-shared", "-fPIC", "-o", os.path.join(tmp, "libcuda.so.1"),
+                    os.path.join(tmp, "stub.c")], check=True)
+    tool = os.path.join(tmp, "nvsnap-gpu-suspend")
+    subprocess.run(["gcc", "-O2", "-Wall", "-Wextra", "-Werror", "-I", SRC, "-I", CUDA_INC, "-o", tool,
+                    os.path.join(SRC, "nvsnap-gpu-suspend.c"), "-ldl", "-lpthread"], check=True)
+    return tool
+
+
+WORKLOAD = r"""
+import os, socket, sys, time
+s = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+s.bind("\0nvsnap-gpushare.%d" % os.getpid())
+s.listen(16)
+print("ready", flush=True)
+while True:
+    c, _ = s.accept()
+    cmd = c.recv(4096).rstrip(b"\0").decode()
+    if cmd == "quiesce":
+        time.sleep(float(sys.argv[1]))
+        rep = "err busy (GPU work did not drain)"
+    elif cmd.startswith("resume"):
+        rep = "ok resumed"
+    else:
+        rep = "err unknown command"
+    c.send(rep.encode() + b"\0")
+    c.close()
+"""
+
+
+def busy_workload():
+    """A process whose control socket always answers quiesce busy."""
+    p = subprocess.Popen([sys.executable, "-I", "-c", WORKLOAD, str(BUSY_REPLY_S)], stdout=subprocess.PIPE, text=True)
+    if p.stdout.readline().strip() != "ready":
+        p.kill()
+        raise RuntimeError("fake workload did not start")
+    return p
+
+
+class QuiesceDeadline(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if not shutil.which("gcc") or not os.path.exists(os.path.join(CUDA_INC, "cuda.h")):
+            raise unittest.SkipTest("needs gcc and cuda.h (CUDA_INC)")
+        cls.tmp = tempfile.mkdtemp()
+        cls.tool = build(cls.tmp)
+        cls.env = dict(os.environ, LD_LIBRARY_PATH=cls.tmp)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def setUp(self):
+        w = busy_workload()
+        self.addCleanup(w.wait)
+        self.addCleanup(w.kill)
+        self.pid = w.pid
+
+    def run_tool(self, *args, timeout=60):
+        t0 = time.monotonic()
+        p = subprocess.run([self.tool, *args], env=self.env, capture_output=True, text=True, timeout=timeout)
+        return p, time.monotonic() - t0
+
+    def test_timeout_is_wall_clock(self):
+        # 1 s at one attempt per (0.6 s reply + 0.25 s pause): counting
+        # attempts (4 of 250 ms) ran about 3.4 s; the deadline stops at ~1.7 s.
+        p, took = self.run_tool("--timeout-ms", "1000", "suspend", str(self.pid))
+        self.assertLess(took, 2.5, "a 1 s quiesce timeout ran %.1f s:\n%s" % (took, p.stdout))
+        self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("err busy (GPU work did not drain)", p.stdout)
+        self.assertIn("not quiesced after", p.stdout)
+
+    def test_fabric_abort_ends_the_suspend(self):
+        fabric = tempfile.mkdtemp(dir=self.tmp)
+        stop = threading.Event()
+        verdicts = []
+
+        def driver():
+            # Answer the first vote "retry" and the second "abort", as the
+            # agent does once its quiesce deadline has passed.
+            seen = -1
+            while not stop.is_set():
+                try:
+                    with open(os.path.join(fabric, "q")) as f:
+                        attempt = int(f.read().split()[0])
+                except (OSError, ValueError, IndexError):
+                    attempt = -1
+                if attempt > seen:
+                    seen = attempt
+                    v = "retry" if attempt == 0 else "abort"
+                    verdicts.append(v)
+                    with open(os.path.join(fabric, "d.tmp"), "w") as f:
+                        f.write("%d %s\n" % (attempt, v))
+                    os.rename(os.path.join(fabric, "d.tmp"), os.path.join(fabric, "d"))
+                time.sleep(0.05)
+
+        t = threading.Thread(target=driver, daemon=True)
+        t.start()
+        self.addCleanup(stop.set)
+        # A long timeout: only the abort can end the suspend this soon.
+        p, took = self.run_tool("--timeout-ms", "120000", "--fabric-map", fabric, "suspend", str(self.pid))
+        self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(verdicts[:2], ["retry", "abort"])
+        self.assertIn("the vote was aborted at attempt 1: rolling back", p.stdout)
+        self.assertLess(took, 10, "the suspend went on %.1f s after the abort:\n%s" % (took, p.stdout))
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

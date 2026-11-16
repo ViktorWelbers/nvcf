@@ -781,3 +781,52 @@ func TestDriveFabric_RetriesLostDeliveries(t *testing.T) {
 		}
 	})
 }
+
+// A vote that keeps finding a node busy is aborted at the deadline, for
+// every member at its next vote, so all roll back at the same attempt
+// instead of retrying for as long as their tools would.
+func TestDriveFabric_VoteDeadlineAbortsEveryMember(t *testing.T) {
+	a, b := &fakeFabricMember{name: "a"}, &fakeFabricMember{name: "b"}
+	ds, res, cancel := startDriveOpts([]fabricMember{a, b}, fabricDriveOpts{Vote: true, VoteDeadline: 300 * time.Millisecond})
+	defer cancel()
+
+	a.vote(0, true)
+	b.vote(0, false)
+	eventually(t, "retry", func() bool { v, _ := b.sent(); return len(v) == 1 })
+	time.Sleep(400 * time.Millisecond)
+	a.vote(1, true)
+	b.vote(1, false)
+	eventually(t, "abort", func() bool {
+		va, _ := a.sent()
+		vb, _ := b.sent()
+		return len(va) == 2 && len(vb) == 2
+	})
+	for _, m := range []*fakeFabricMember{a, b} {
+		if v, _ := m.sent(); !reflect.DeepEqual(v, []string{"0 retry", "1 abort"}) {
+			t.Errorf("%s verdicts = %v, want [0 retry, 1 abort]", m.name, v)
+		}
+	}
+	ds.set(0)
+	ds.set(1)
+	if out := <-res; out.Went {
+		t.Errorf("outcome %+v: went after the deadline", out)
+	}
+}
+
+// Before the deadline a busy vote is retried as before.
+func TestDriveFabric_VoteDeadlineLeavesATimelyVote(t *testing.T) {
+	a, b := &fakeFabricMember{name: "a"}, &fakeFabricMember{name: "b"}
+	ds, res, cancel := startDriveOpts([]fabricMember{a, b}, fabricDriveOpts{Vote: true, VoteDeadline: time.Minute})
+	defer cancel()
+	a.vote(0, true)
+	b.vote(0, false)
+	eventually(t, "retry", func() bool { v, _ := b.sent(); return len(v) == 1 })
+	a.vote(1, true)
+	b.vote(1, true)
+	eventually(t, "go", func() bool { v, _ := b.sent(); return len(v) == 2 })
+	ds.set(0)
+	ds.set(1)
+	if out := <-res; !out.Went || out.Attempts != 2 {
+		t.Errorf("outcome %+v, want went at attempt 2", out)
+	}
+}

@@ -490,6 +490,12 @@ type fabricDriveOpts struct {
 	LostOther func() bool
 	// OnGo runs once, when the vote goes: the GPU ranks stop now.
 	OnGo func()
+	// VoteDeadline ends a vote that has not gone this long after the
+	// first vote: every member is answered "abort" at its next vote, so
+	// all stop at the same attempt and roll back. The members' tools keep
+	// a later deadline of their own, for a driver that never answers.
+	// Zero: none.
+	VoteDeadline time.Duration
 	// Unlock: hold every member until all are restored, then unlock them
 	// together (group restore). The exchange waits for the unlock.
 	Unlock bool
@@ -504,7 +510,8 @@ type fabricDriveOpts struct {
 // Vote: once every member still running has voted the same attempt, the
 // answer is "go" if all are quiesced, else "retry". A member whose
 // checkpoint returned before the go cannot release: every later vote is
-// answered "abort", and the others roll back at their tool's timeout.
+// answered "abort", and the others roll back. So is every vote once
+// VoteDeadline has passed.
 //
 // Unlock: once every member has reported its CRIU restore done, all get
 // "unlock". A member that returns first has failed; the rest get "abort".
@@ -517,6 +524,7 @@ func driveFabric(ctx context.Context, members []fabricMember, done func(i int) b
 	var out fabricOutcome
 	vote := &fabricVoter{decided: -1, abortSent: map[int]int{}}
 	aborted := false
+	var firstVote time.Time
 	// Each phase is sent to every running member and retried, each poll, to
 	// the ones it did not reach; it is complete only once all have it. A
 	// member waits for its message, and the receivers' writes are atomic
@@ -553,6 +561,19 @@ func driveFabric(ctx context.Context, members []fabricMember, done func(i int) b
 			if (lostOne || (opts.LostOther != nil && opts.LostOther())) && !aborted {
 				aborted = true
 				log.Warn("gpushare fabric: a member ended before the quiesce vote passed; aborting the vote")
+			}
+			if firstVote.IsZero() {
+				for _, st := range states {
+					if st.Vote != nil {
+						firstVote = time.Now()
+						break
+					}
+				}
+			}
+			if !aborted && opts.VoteDeadline > 0 && !firstVote.IsZero() && time.Since(firstVote) > opts.VoteDeadline {
+				aborted = true
+				log.WithFields(logrus.Fields{"deadline": opts.VoteDeadline.String(), "attempts": vote.decided + 1}).
+					Warn("gpushare fabric: the GPU work did not quiesce on every node in time; aborting the vote, the members roll back")
 			}
 			vote.drive(ctx, members, running, states, aborted, &out, log)
 			if out.Went && opts.OnGo != nil {
@@ -927,7 +948,8 @@ func (a *Agent) groupCheckpoint(ctx context.Context, req GroupCheckpointRequest,
 		}
 		return false
 	}
-	res.Fabric = driveFabric(ctx, fabric, done, fabricDriveOpts{Vote: true, LostOther: lostCompanion, OnGo: hold.steps().onGo}, log)
+	res.Fabric = driveFabric(ctx, fabric, done, fabricDriveOpts{Vote: true, LostOther: lostCompanion, OnGo: hold.steps().onGo,
+		VoteDeadline: gpushareQuiesceTimeout}, log)
 	wg.Wait()
 	<-freezeDone
 
