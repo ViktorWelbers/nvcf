@@ -73,6 +73,8 @@ func TestUsesModelExpress(t *testing.T) {
 	fakeMXProc(t, base, 10, []string{"PATH=/bin", "MODEL_EXPRESS_URL=http://mx:8001"}, []string{"python3", "-m", "vllm"})
 	fakeMXProc(t, base, 11, []string{"PATH=/bin"}, []string{"vllm", "serve", "m", "--load-format", "mx"})
 	fakeMXProc(t, base, 12, []string{"PATH=/bin"}, []string{"vllm", "serve", "m", "--load-format=mx"})
+	fakeMXProc(t, base, 13, []string{"PATH=/bin"}, []string{"python3", "-m", "dynamo.vllm", "--load-format", "modelexpress"})
+	fakeMXProc(t, base, 14, []string{"PATH=/bin"}, []string{"python3", "-m", "dynamo.vllm", "--load-format=modelexpress"})
 	fakeMXProc(t, base, 20, []string{"MODEL_EXPRESS_URL="}, []string{"vllm", "serve", "m", "--load-format", "safetensors"})
 	fakeMXProc(t, base, 21, []string{"MY_MODEL_EXPRESS_URL=x"}, []string{"vllm", "serve", "mx"})
 	for _, tc := range []struct {
@@ -82,6 +84,8 @@ func TestUsesModelExpress(t *testing.T) {
 		{[]int{10}, true},
 		{[]int{11}, true},
 		{[]int{12}, true},
+		{[]int{13}, true}, // as Dynamo workers name it
+		{[]int{14}, true},
 		{[]int{20, 21}, false},
 		{[]int{99}, false}, // gone
 		{[]int{20, 11}, true},

@@ -51,8 +51,8 @@ func gpushareMXSupported(toolText string) bool {
 
 // usesModelExpress reports whether any of the processes pids (host
 // numbering under procBase) loads its weights through ModelExpress: it has
-// MODEL_EXPRESS_URL in its environment, or --load-format mx on its command
-// line. A process that cannot be read counts as not.
+// MODEL_EXPRESS_URL in its environment, or --load-format mx (or
+// modelexpress) on its command line. A process that cannot be read counts as not.
 func usesModelExpress(procBase string, pids []int) bool {
 	for _, pid := range pids {
 		base := filepath.Join(procBase, strconv.Itoa(pid))
@@ -70,13 +70,18 @@ func usesModelExpress(procBase string, pids []int) bool {
 	return false
 }
 
-// loadFormatMX reports whether args set vLLM's --load-format to mx.
+// modelExpressLoadFormats are the --load-format values of the ModelExpress
+// loader: "mx", and "modelexpress" as Dynamo workers name it.
+var modelExpressLoadFormats = map[string]bool{"mx": true, "modelexpress": true}
+
+// loadFormatMX reports whether args set vLLM's --load-format to the
+// ModelExpress loader.
 func loadFormatMX(args []string) bool {
 	for i, a := range args {
-		if a == "--load-format" && i+1 < len(args) && args[i+1] == "mx" {
+		if a == "--load-format" && i+1 < len(args) && modelExpressLoadFormats[args[i+1]] {
 			return true
 		}
-		if a == "--load-format=mx" {
+		if v, ok := strings.CutPrefix(a, "--load-format="); ok && modelExpressLoadFormats[v] {
 			return true
 		}
 	}

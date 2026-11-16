@@ -395,7 +395,7 @@ Limits of the move:
   InfiniBand or RoCE. A workload that has released its RDMA devices by
   capture time is not blocked.
 - ModelExpress: a worker that loads its weights through ModelExpress
-  (`MODEL_EXPRESS_URL` in a process's environment, or `--load-format mx`)
+  (`MODEL_EXPRESS_URL` in a process's environment, or `--load-format mx` or `modelexpress`)
   holds RDMA only to serve its weights to peers, and can drop it. When its
   node bundle's GPU tool has `mx-pause` (ModelExpress 0.7 or later in the
   worker), the preflight reports its RDMA as information, not a block, and
