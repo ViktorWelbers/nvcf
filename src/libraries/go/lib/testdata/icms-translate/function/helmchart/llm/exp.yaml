@@ -224,8 +224,6 @@ spec:
       value: nvcr.io/org/opentelemetry-collector:0.74.0
     - name: OTEL_EXPORTER_OTLP_ENDPOINT
       value: https://prod.otel.example.com:8282
-    - name: PYLON_DO_CALIBRATION
-      value: "true"
     - name: SHARED_CONFIG_DIR
       value: /config/shared
     - name: SIDECAR_REGISTRY_CREDENTIAL

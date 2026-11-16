@@ -262,8 +262,6 @@ spec:
       value: nvcr.io/nvcf-core/opentelemetry-collector:0.74.0
     - name: OTEL_EXPORTER_OTLP_ENDPOINT
       value: https://prod.otel.example.com:8282
-    - name: PYLON_DO_CALIBRATION
-      value: "true"
     - name: PYLON_SHUTDOWN_DRAIN_TIMEOUT_MS
       value: "55000"
     - name: SHARED_CONFIG_DIR

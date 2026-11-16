@@ -42,9 +42,6 @@ const (
 	llmRouterClientImageDefault      = "nvcr.io/0651155215864979/ncp-dev/stargate-client:0.4.0"
 	llmRequestRouterAddressEnv       = "LLM_REQUEST_ROUTER_ADDRESS"
 	legacyStargateAddressEnv         = "STARGATE_ADDRESS"
-	// Pylon releases without a binding for this variable ignore it, so it
-	// needs no version check.
-	pylonDoCalibrationEnv = "PYLON_DO_CALIBRATION"
 
 	llmDirMountPath    = "/var/run/llm"
 	llmWorkerTokenPath = llmDirMountPath + "/worker-token"
@@ -186,11 +183,6 @@ func newLLMRouterClientContainer(
 		llmEnvSet[llmRequestRouterAddressEnv] = llmRequestRouterAddress
 	}
 	normalizeLLMRequestRouterAddressEnvAliases(llmEnvSet)
-	// Calibration replaces the --initial-input-tps seed with a measured rate.
-	// A value from the cluster's function environment overrides wins.
-	if llmEnvSet[pylonDoCalibrationEnv] == "" {
-		llmEnvSet[pylonDoCalibrationEnv] = "true"
-	}
 	// The drain must end before the inference preStop pause does, so the
 	// platform value replaces any value from the function's environment. Helm
 	// functions run Pylon in a separate pod with no pause, so they keep

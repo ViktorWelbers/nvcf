@@ -426,48 +426,6 @@ func TestNewLLMRouterClientContainer(t *testing.T) {
 	}
 }
 
-func TestNewLLMRouterClientContainer_PylonCalibrationEnv_DefaultsOnAndKeepsOverride(t *testing.T) {
-	cases := []struct {
-		name          string
-		isHelm        bool
-		override      string
-		expectedValue string
-	}{
-		{name: "container default", expectedValue: "true"},
-		{name: "helm default", isHelm: true, expectedValue: "true"},
-		{name: "override off", override: "false", expectedValue: "false"},
-		{name: "override on", override: "true", expectedValue: "true"},
-	}
-
-	for _, tt := range cases {
-		t.Run(tt.name, func(t *testing.T) {
-			allEnvSet := map[string]string{
-				"LLM_REQUEST_ROUTER_ADDRESS": "llm-router.example.com:443",
-				"INFERENCE_PORT":             "8080",
-			}
-			if tt.override != "" {
-				allEnvSet["PYLON_DO_CALIBRATION"] = tt.override
-			}
-
-			c, err := newLLMRouterClientContainer(&LaunchSpecification{}, allEnvSet, TranslateConfig{}, "inst-1", tt.isHelm)
-
-			require.NoError(t, err)
-			var values []string
-			for _, env := range c.Env {
-				if env.Name == "PYLON_DO_CALIBRATION" {
-					values = append(values, env.Value)
-				}
-			}
-			assert.Equal(t, []string{tt.expectedValue}, values)
-			assertCanonicalPylonBootstrapArgs(t, c.Args)
-			// A flag would override PYLON_BRINGUP_CALIBRATION_TIMEOUT_MS from functionEnvOverrides.
-			for _, arg := range c.Args {
-				assert.False(t, strings.HasPrefix(arg, "--bringup-calibration-timeout-ms"))
-			}
-		})
-	}
-}
-
 func TestNewLLMCredentialManagerContainer(t *testing.T) {
 	type spec struct {
 		name      string
