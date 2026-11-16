@@ -91,7 +91,7 @@ mod tests {
     use super::*;
     use super::{calibration::*, lifecycle::*, upstream::*};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
 
     use axum::Json;
     use axum::Router;
@@ -567,7 +567,7 @@ mod tests {
                 concurrency: 2,
             },
             &test_runtime_state(),
-            false,
+            None,
         )
         .await
         .expect("calibration batch should succeed");
@@ -776,7 +776,7 @@ mod tests {
                 concurrency: 3,
             },
             &test_runtime_state(),
-            false,
+            None,
         )
         .await
         .expect("calibration batch should succeed");
@@ -819,7 +819,7 @@ mod tests {
                 concurrency: 1,
             },
             &runtime_state,
-            false,
+            None,
         )
         .await
         .expect("calibration batch should succeed");
@@ -1038,7 +1038,7 @@ mod tests {
                     concurrency: 1,
                 },
                 &runtime_state,
-                input_tokens_from_usage,
+                input_tokens_from_usage.then_some(&AtomicBool::new(false)),
             )
             .await
             .expect("calibration batch should succeed");
@@ -1078,21 +1078,25 @@ mod tests {
         let dispatch = tracing::Dispatch::new(subscriber.clone());
         let default_guard = tracing::dispatcher::set_default(&dispatch);
 
-        send_calibration_batch(
-            &reqwest::Client::new(),
-            server.as_str(),
-            &test_generation(),
-            Duration::from_secs(1),
-            CalibrationBatch {
-                prompt_units: CALIBRATION_PROMPT_UNITS_FLOOR,
-                request_count: 2,
-                concurrency: 1,
-            },
-            &runtime_state,
-            true,
-        )
-        .await
-        .expect("calibration batch should succeed");
+        // Two steps of one ramp share the flag, so the line is logged once.
+        let prompt_tokens_missing = AtomicBool::new(false);
+        for _ in 0..2 {
+            send_calibration_batch(
+                &reqwest::Client::new(),
+                server.as_str(),
+                &test_generation(),
+                Duration::from_secs(1),
+                CalibrationBatch {
+                    prompt_units: CALIBRATION_PROMPT_UNITS_FLOOR,
+                    request_count: 2,
+                    concurrency: 1,
+                },
+                &runtime_state,
+                Some(&prompt_tokens_missing),
+            )
+            .await
+            .expect("calibration batch should succeed");
+        }
         drop(default_guard);
 
         let completed = observations
@@ -2118,7 +2122,7 @@ mod tests {
                     concurrency: 1,
                 },
                 &test_runtime_state(),
-                false,
+                None,
             )
             .await
             .unwrap_or_else(|error| {

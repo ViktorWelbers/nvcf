@@ -48,6 +48,7 @@ pub(crate) async fn run_calibration(
     let mut last_completed = None;
     let mut completed_prompt_units = Vec::new();
 
+    let prompt_tokens_missing = AtomicBool::new(false);
     let mut ramp = calibration_ramp(config);
     while let Some(step) = ramp.next() {
         let result = send_calibration_batch(
@@ -57,7 +58,10 @@ pub(crate) async fn run_calibration(
             config.calibration_timeout,
             step,
             runtime_state,
-            config.fallback_input_tps.is_some(),
+            config
+                .fallback_input_tps
+                .is_some()
+                .then_some(&prompt_tokens_missing),
         )
         .await;
         // With a fallback rate, a 529 ends the ramp like a step timeout and keeps
@@ -198,14 +202,16 @@ pub(super) async fn send_calibration_batch(
     timeout: Duration,
     batch: CalibrationBatch,
     runtime_state: &PylonRuntimeState,
-    input_tokens_from_usage: bool,
+    // `Some` counts input tokens from `usage.prompt_tokens`. The flag spans the
+    // whole ramp, so a backend without that field is logged once per model.
+    prompt_tokens_missing: Option<&AtomicBool>,
 ) -> Result<CalibrationStepOutcome, BringupError> {
     let CalibrationBatch {
         prompt_units,
         request_count,
         concurrency,
     } = batch;
-    let prompt_tokens_missing = AtomicBool::new(false);
+    let input_tokens_from_usage = prompt_tokens_missing.is_some();
     let step = stream::iter((0..request_count).map(|_| {
         let request = serde_json::json!({
             "model": generation.model_id(),
@@ -230,19 +236,18 @@ pub(super) async fn send_calibration_batch(
     }))
     .buffer_unordered(concurrency.min(request_count))
     .try_for_each(|completion| {
-        if input_tokens_from_usage && !completion.has_prompt_tokens() {
-            prompt_tokens_missing.store(true, Ordering::Relaxed);
+        if let Some(missing) = prompt_tokens_missing
+            && !completion.has_prompt_tokens()
+            && !missing.swap(true, Ordering::Relaxed)
+        {
+            tracing::info!(
+                model_id = generation.model_id(),
+                "calibration responses have no usage.prompt_tokens; counting prompt characters as input tokens"
+            );
         }
         async { Ok(()) }
     });
-    let outcome = tokio::time::timeout(timeout, step).await;
-    if prompt_tokens_missing.load(Ordering::Relaxed) {
-        tracing::info!(
-            model_id = generation.model_id(),
-            "calibration responses have no usage.prompt_tokens; counting prompt characters as input tokens"
-        );
-    }
-    match outcome {
+    match tokio::time::timeout(timeout, step).await {
         Ok(outcome) => outcome.map(|()| CalibrationStepOutcome::Completed),
         Err(_) => Ok(CalibrationStepOutcome::Saturated),
     }
