@@ -391,7 +391,8 @@ func (c *criuAutoRestorer) considerGPUShareFailure(ctx context.Context, pod *cor
 		}
 		return
 	}
-	marked, err := c.markGPUShareFailed(ctx, key, bundle, failure)
+	evidence := c.a.gpushareFailureEvidence(ctx, pod, log)
+	marked, err := c.markGPUShareFailed(ctx, key, bundle, failure, evidence)
 	if err != nil {
 		retryLater()
 		log.WithError(err).Warn("gpushare: cannot mark the configuration; the pod is left as it is")
@@ -410,6 +411,8 @@ func (c *criuAutoRestorer) considerGPUShareFailure(ctx context.Context, pod *cor
 		return
 	}
 	log.Warn("gpushare: the pod never started under the library; its configuration falls back to the cachedir without it, and the pod is replaced")
+	// Its logs go with it: the end of the failed run's, into the agent's.
+	c.a.logFailedRunTail(ctx, pod, gpuContainer(pod), log)
 	if err := c.a.deletePodRetrying(ctx, pod.Namespace, pod.Name, pod.UID); err != nil {
 		log.WithError(err).Warn("gpushare: cannot delete the pod; its replacement will be admitted without the library")
 	}
@@ -462,8 +465,9 @@ func clearGPUShare(d map[string]string, bundle, failure string) bool {
 }
 
 // markGPUShareFailed marks the group record of key (its instance's
-// through an alias), creating it when there is none.
-func (c *criuAutoRestorer) markGPUShareFailed(ctx context.Context, key, bundle, failure string) (bool, error) {
+// through an alias), creating it when there is none, and keeps the failed
+// pod's evidence (gpushare_evidence.go) with the mark.
+func (c *criuAutoRestorer) markGPUShareFailed(ctx context.Context, key, bundle, failure, evidence string) (bool, error) {
 	cms := c.a.kubeClient.CoreV1().ConfigMaps(c.a.criuFailedNamespace())
 	target := key
 	if cm, err := cms.Get(ctx, criuGroupConfigMapName(key), metav1.GetOptions{}); err == nil && cm.Data["state"] == criuGroupStateAlias {
@@ -471,6 +475,7 @@ func (c *criuAutoRestorer) markGPUShareFailed(ctx context.Context, key, bundle, 
 	} else if apierrors.IsNotFound(err) {
 		d := map[string]string{}
 		markGPUShare(d, bundle, failure, time.Now())
+		keepEvidence(d, evidence)
 		_, err := cms.Create(ctx, &corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{Name: criuGroupConfigMapName(key), Labels: map[string]string{"app.kubernetes.io/managed-by": "nvsnap"}},
 			Data:       d,
@@ -487,6 +492,9 @@ func (c *criuAutoRestorer) markGPUShareFailed(ctx context.Context, key, bundle, 
 	marked := false
 	err := c.updateGroupRecord(ctx, target, func(d map[string]string) bool {
 		marked = markGPUShare(d, bundle, failure, time.Now())
+		if marked {
+			keepEvidence(d, evidence)
+		}
 		return marked
 	})
 	return marked, err

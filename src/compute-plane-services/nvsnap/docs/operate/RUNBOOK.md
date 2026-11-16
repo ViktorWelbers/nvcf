@@ -206,7 +206,12 @@ three times.
 - `gpushare-failed`: the record's `gpushareFailure` has the container's
   last termination (reason, exit code, its termination message) and, for a
   SIGKILL that was not an OOM kill, the kubelet's account from the pod's
-  events (a failed liveness probe, say).
+  events (a failed liveness probe, say). Its `gpushareEvidence` (JSON) keeps
+  what the deleted pod took with it: the last termination with its times,
+  the container's probes and grace period, and the pod's last 20 events.
+  The end of the failed run's log (200 lines, 16 KiB) is in the agent's
+  log only, never on the record: search the agent's log for "the end of
+  the failed run's log" and the pod's name.
 - Captures that failed for the workload's own doing (`reason`
   `workload_exited`: it ended during the capture; `no_gpu_process`: it had
   nothing on the GPU) do not fire this alert; they are on the dashboard's
