@@ -240,7 +240,7 @@ pub(super) async fn send_calibration_batch(
             && !completion.has_prompt_tokens()
             && !missing.swap(true, Ordering::Relaxed)
         {
-            tracing::info!(
+            tracing::warn!(
                 model_id = generation.model_id(),
                 "calibration responses have no usage.prompt_tokens; counting prompt characters as input tokens"
             );

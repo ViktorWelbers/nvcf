@@ -1108,11 +1108,11 @@ mod tests {
             completed.input_tokens,
             CALIBRATION_PROMPT_UNITS_FLOOR as u64
         );
+        let message = "calibration responses have no usage.prompt_tokens; counting prompt characters as input tokens";
+        assert_eq!(subscriber.event_count(message), 1);
         assert_eq!(
-            subscriber.event_count(
-                "calibration responses have no usage.prompt_tokens; counting prompt characters as input tokens"
-            ),
-            1
+            crate::test_support::tracing_event_by_message(&subscriber.events(), message).level,
+            tracing::Level::WARN
         );
         server.shutdown().await;
     }
