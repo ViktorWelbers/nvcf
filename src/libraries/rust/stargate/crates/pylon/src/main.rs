@@ -92,7 +92,7 @@ struct Args {
     #[arg(long, value_name = "MS")]
     upstream_health_wait_ms: Option<u64>,
     /// Run local input-TPS calibration before contacting Stargate. Use only when this is the cluster's sole Pylon. With --initial-input-tps, a 529 ends a model's ramp, and a model whose calibration fails starts at that rate
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = false, env = "PYLON_DO_CALIBRATION")]
     do_calibration: bool,
     /// Bootstrap input TPS for every configured model. With --do-calibration, used only for a model whose calibration fails or measures nothing
     #[arg(long, value_name = "TPS")]
@@ -121,8 +121,13 @@ struct Args {
     /// Timeout for canary requests in milliseconds. A canary that times out or gets an overload reply while requests for any model name on this Pylon make progress does not mark the model unavailable; this assumes the names share workers, as aliases do
     #[arg(long, default_value_t = 5000, value_name = "MS")]
     bringup_canary_timeout_ms: u64,
-    /// Timeout for calibration requests in milliseconds
-    #[arg(long, default_value_t = 30000, value_name = "MS")]
+    /// Time limit in milliseconds for each calibration load step. A step that takes longer ends the model's ramp
+    #[arg(
+        long,
+        default_value_t = 5000,
+        env = "PYLON_BRINGUP_CALIBRATION_TIMEOUT_MS",
+        value_name = "MS"
+    )]
     bringup_calibration_timeout_ms: u64,
     /// Upstream HTTP path to poll for KV-cache stats. Omit to disable KV metric polling
     #[arg(long, value_name = "PATH")]
@@ -369,6 +374,33 @@ mod tests {
             argument.get_env(),
             Some(std::ffi::OsStr::new("STARGATE_GRPC_TLS_CA_CERT_PATH"))
         );
+    }
+
+    #[test]
+    fn calibration_flags_declare_environment_bindings() {
+        let command = <Args as clap::CommandFactory>::command();
+        for (id, env) in [
+            ("do_calibration", "PYLON_DO_CALIBRATION"),
+            (
+                "bringup_calibration_timeout_ms",
+                "PYLON_BRINGUP_CALIBRATION_TIMEOUT_MS",
+            ),
+        ] {
+            let argument = command
+                .get_arguments()
+                .find(|argument| argument.get_id() == id)
+                .unwrap_or_else(|| panic!("{id} argument should exist"));
+
+            assert_eq!(argument.get_env(), Some(std::ffi::OsStr::new(env)), "{id}");
+        }
+    }
+
+    #[test]
+    fn calibration_defaults_to_off_with_a_five_second_step_limit() {
+        let args = parse_args("");
+
+        assert!(!args.do_calibration);
+        assert_eq!(args.bringup_calibration_timeout_ms, 5000);
     }
 
     #[test]
