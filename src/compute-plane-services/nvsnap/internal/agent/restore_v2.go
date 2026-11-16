@@ -502,6 +502,8 @@ func (a *Agent) restoreV2(ctx context.Context, metadata *CheckpointMetadata, che
 				return nil, err
 			}
 		}
+		// After the network unlock: ModelExpress republishes over it.
+		goResumeRestoredModelExpress(ctx, gs, tools.gpuToolText(), toolPID, log)
 	} else if gs != nil {
 		if err := resumeGPU(false); err != nil {
 			return nil, err
@@ -509,6 +511,7 @@ func (a *Agent) restoreV2(ctx context.Context, metadata *CheckpointMetadata, che
 		if err := continueTasks(); err != nil {
 			return nil, err
 		}
+		goResumeRestoredModelExpress(ctx, gs, tools.gpuToolText(), toolPID, log)
 	}
 
 	duration := time.Since(startTime).Seconds()

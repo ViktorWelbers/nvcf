@@ -250,7 +250,9 @@ The preflight's host checks read every member's processes on its node. Two kinds
 the capture before anything is frozen, each finding naming the process:
 
 - RDMA devices open or mapped (`/dev/infiniband/uverbs*`, `rdma_cm`): CRIU cannot dump them
-  (checkpoint-restore/criu#267), and their state would be useless after a restore (`rdmaDevices`).
+  (checkpoint-restore/criu#267), and their state would be useless after a restore (`rdmaDevices`). A ModelExpress
+  worker whose GPU tool has `mx-pause` is not blocked: the capture has ModelExpress release them right before the
+  suspend, and fails there, before anything is stopped, if any are still held (design/GPUSHARE.md, "ModelExpress").
 - MPTCP sockets (`IPPROTO_MPTCP`, 262): CRIU cannot dump them (`inet: Unsupported proto 262`). Go 1.24 and later
   open MPTCP listeners by default, so a recent Go service such as a NATS server holds them without asking.
   Setting `GODEBUG=multipathtcp=0` on that service makes it capturable. Support is tracked in

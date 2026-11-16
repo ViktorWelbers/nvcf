@@ -394,6 +394,30 @@ Limits of the move:
   for example, ModelExpress peer-to-peer over RDMA (NIXL/UCX) and NCCL over
   InfiniBand or RoCE. A workload that has released its RDMA devices by
   capture time is not blocked.
+- ModelExpress: a worker that loads its weights through ModelExpress
+  (`MODEL_EXPRESS_URL` in a process's environment, or `--load-format mx`)
+  holds RDMA only to serve its weights to peers, and can drop it. When its
+  node bundle's GPU tool has `mx-pause` (ModelExpress 0.7 or later in the
+  worker), the preflight reports its RDMA as information, not a block, and
+  each member's agent runs `mx-pause` on the GPU processes right before the
+  suspend, after the instance is held and the capture claimed, so a
+  skipped or retried capture never pauses a serving worker. `mx-pause`
+  fails while any RDMA device is still held (NCCL or NIXL KV over RDMA
+  outside ModelExpress): the capture fails there, before anything is
+  stopped, with the tool's reason, and the agent runs `mx-resume`. Every
+  way the source runs on after a pause (a failed capture, a leave-running
+  dump) runs `mx-resume` after the source's resume. The capture records
+  that it paused (`modelExpress` in the checkpoint's gpushare metadata); its
+  restore runs `mx-resume` once the GPU launches run and the network is
+  unlocked: after `open` and the network unlock for a group, after `resume`
+  otherwise (mx refuses while launches are held, and republishes over the
+  network). It runs in the background, off the restore's path. A failed
+  `mx-resume` is logged and does not fail the restore: the worker serves,
+  but does not share its weights with peers. The preflight passes the RDMA
+  of the processes mx-pause addresses only (the GPU processes under the
+  library that use ModelExpress); any other process's RDMA still blocks.
+  A source whose GPU resume failed gets no `mx-resume`: it is replaced.
+  `internal/agent/gpushare_mx.go`.
 
 ## Validation
 

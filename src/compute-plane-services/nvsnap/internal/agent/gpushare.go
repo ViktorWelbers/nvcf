@@ -82,6 +82,9 @@ type GPUShareInfo struct {
 	// LibPath is where the processes mapped the shim from; a placeholder
 	// must provide the same file at the same path.
 	LibPath string `json:"libPath"`
+	// ModelExpress: the capture paused ModelExpress in PIDs (mx-pause); a
+	// restore resumes it once their GPU launches run (gpushare_mx.go).
+	ModelExpress bool `json:"modelExpress,omitempty"`
 }
 
 // gpushareProc is what the dump needs to know about one process.
