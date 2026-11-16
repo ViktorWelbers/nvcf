@@ -39,21 +39,31 @@ import static org.mockito.Mockito.when;
 
 import com.datastax.oss.driver.api.core.CqlSession;
 import com.nvidia.apikeys.config.exceptions.CassandraException;
+import com.nvidia.apikeys.persistance.models.KeyByOwnerAndAccountAndServiceModel;
 import com.nvidia.apikeys.persistance.models.KeyModel;
 import com.nvidia.apikeys.persistance.repositories.KeyByOwnerAndServiceRepository;
 import com.nvidia.apikeys.persistance.repositories.KeyRepository;
+import com.nvidia.apikeys.services.KeyNcaIdResolver;
+import com.nvidia.apikeys.services.ServicesService;
+import com.nvidia.apikeys.vo.KeyByOwnerAndAccountAndServiceVo;
 import com.nvidia.apikeys.vo.SavedKeyVo;
 import com.nvidia.boot.exceptions.ServiceUnavailableException;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.prometheusmetrics.PrometheusConfig;
+import io.micrometer.prometheusmetrics.PrometheusMeterRegistry;
 import java.time.Clock;
 import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.http.HttpHeaders;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Answers;
 import org.mockito.InOrder;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
+import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.cassandra.CassandraWriteTimeoutException;
 import org.springframework.data.cassandra.core.CassandraBatchOperations;
@@ -67,6 +77,17 @@ import org.springframework.data.cassandra.core.WriteResult;
 class KeysDaoTest {
 
     private static final long NOW_MICROS = 1_791_965_640_123_456L;
+    private static final String NCA_ID = "test-nca-id";
+    private static final KeyByOwnerAndAccountAndServiceVo KEY_BY_ACCOUNT_VO_1 =
+            new KeyByOwnerAndAccountAndServiceVo(KEY_BY_OWNER_AND_SERVICE_VO_1, NCA_ID);
+    private static final KeyByOwnerAndAccountAndServiceModel KEY_BY_ACCOUNT_MODEL_1 =
+            KeyByOwnerAndAccountAndServiceModel.builder()
+                    .ncaId(NCA_ID)
+                    .ownerType(USER)
+                    .ownerId(USER_KEY_OWNER_ID_1)
+                    .issuerServiceId(SERVICE_ID_1)
+                    .keyId(KEY_ID_1)
+                    .build();
     private static final InsertOptions DIRECT_INSERT_OPTIONS =
             InsertOptions.builder().timestamp(NOW_MICROS).idempotent(true).build();
     private static final DeleteOptions DIRECT_DELETE_OPTIONS =
@@ -82,6 +103,14 @@ class KeysDaoTest {
     private KeyModelConverter converterMock;
     @Mock
     private KeyByOwnerAndServiceModelConverter keyByOwnerAndServiceConverterMock;
+    @Mock
+    private KeyByOwnerAndAccountAndServiceModelConverter keyByAccountConverterMock;
+    @Mock
+    private KeyNcaIdResolver ncaIdResolverMock;
+    @Mock
+    private ServicesService servicesServiceMock;
+    @Spy
+    private MeterRegistry meterRegistry = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
     @Mock
     private CassandraTemplate cassandraTemplateMock;
     @Mock
@@ -110,6 +139,10 @@ class KeysDaoTest {
 
         assertThat(dao.save(KEY_VO_1, KEY_OWNER_VO_1)).isEqualTo(expectedSavedKey());
         verify(cassandraTemplateMock, never()).insert(any(), any(InsertOptions.class));
+        verify(cassandraBatchOperationsMock).insert(List.of(KEY_BY_ACCOUNT_MODEL_1));
+        assertThat(writes("keys", "batch")).isEqualTo(1);
+        assertThat(writes("keys_by_owner_and_service", "batch")).isEqualTo(1);
+        assertThat(writes("keys_by_owner_and_account_and_service", "batch")).isEqualTo(1);
     }
 
     @Test
@@ -133,6 +166,7 @@ class KeysDaoTest {
         assertThrowsExceptionWithDetails(
                 CassandraException.class, () -> dao.save(KEY_VO_1, KEY_OWNER_VO_1),
                 "Failed to write key into db");
+        assertThat(writes("keys_by_owner_and_account_and_service", "failed")).isEqualTo(1);
     }
 
     @Test
@@ -146,7 +180,35 @@ class KeysDaoTest {
         InOrder inOrder = inOrder(cassandraTemplateMock);
         inOrder.verify(cassandraTemplateMock).insert(
                 KEY_BY_OWNER_AND_SERVICE_MODEL_1, DIRECT_INSERT_OPTIONS);
+        inOrder.verify(cassandraTemplateMock).insert(
+                KEY_BY_ACCOUNT_MODEL_1, DIRECT_INSERT_OPTIONS);
         inOrder.verify(cassandraTemplateMock).insert(modelMock, DIRECT_INSERT_OPTIONS);
+        assertThat(writes("keys", "direct")).isEqualTo(1);
+        assertThat(writes("keys_by_owner_and_service", "direct")).isEqualTo(1);
+        assertThat(writes("keys_by_owner_and_account_and_service", "direct")).isEqualTo(1);
+    }
+
+    @Test
+    void save_doesNotWriteKeyIfAccountRowFailsDirectly() {
+        mockSaveBatch();
+        when(cassandraBatchOperationsMock.execute()).thenThrow(batchlogTimeout());
+        when(cassandraTemplateMock.insert(any(), any(InsertOptions.class)))
+                .thenAnswer(invocation -> {
+                    if (KEY_BY_ACCOUNT_MODEL_1.equals(invocation.getArgument(0))) {
+                        throw writeTimeout("SIMPLE");
+                    }
+                    return null;
+                });
+
+        var ex = assertThrowsExceptionWithDetails(
+                ServiceUnavailableException.class, () -> dao.save(KEY_VO_1, KEY_OWNER_VO_1),
+                "Key storage is temporarily unavailable, the outcome of the write is unknown");
+
+        assertThat(ex.getHeaders().containsHeader(HttpHeaders.RETRY_AFTER)).isFalse();
+        verify(cassandraTemplateMock, never()).insert(eq(modelMock), any(InsertOptions.class));
+        assertThat(writes("keys_by_owner_and_service", "direct")).isEqualTo(1);
+        assertThat(writes("keys_by_owner_and_account_and_service", "failed")).isEqualTo(1);
+        assertThat(writes("keys", "direct")).isZero();
     }
 
     @Test
@@ -184,6 +246,7 @@ class KeysDaoTest {
 
         verify(cassandraBatchOperationsMock).delete(List.of(KEY_BY_OWNER_AND_SERVICE_MODEL_1));
         verify(cassandraBatchOperationsMock).delete(List.of(expectedDeletedKeyModel));
+        verify(cassandraBatchOperationsMock).delete(List.of(KEY_BY_ACCOUNT_MODEL_1));
         verify(cassandraBatchOperationsMock).execute();
         verify(cassandraTemplateMock, never()).delete(any(), any(DeleteOptions.class));
     }
@@ -211,6 +274,8 @@ class KeysDaoTest {
                 expectedDeletedKeyModel, DIRECT_DELETE_OPTIONS);
         inOrder.verify(cassandraTemplateMock).delete(
                 KEY_BY_OWNER_AND_SERVICE_MODEL_1, DIRECT_DELETE_OPTIONS);
+        inOrder.verify(cassandraTemplateMock).delete(
+                KEY_BY_ACCOUNT_MODEL_1, DIRECT_DELETE_OPTIONS);
     }
 
     @Test
@@ -225,6 +290,79 @@ class KeysDaoTest {
                 () -> dao.deleteKey(KEY_BY_OWNER_AND_SERVICE_VO_1),
                 "Key storage is temporarily unavailable, the outcome of the write is unknown");
         assertThat(ex.getHeaders().containsHeader(HttpHeaders.RETRY_AFTER)).isFalse();
+    }
+
+    @Test
+    void metricsArePresentAtZeroOnFirstScrape() {
+        dao.initializeMetrics();
+
+        var scrape = ((PrometheusMeterRegistry) meterRegistry).scrape();
+        for (var table : List.of("keys", "keys_by_owner_and_service",
+                "keys_by_owner_and_account_and_service")) {
+            for (var result : List.of("batch", "direct", "failed")) {
+                assertThat(scrape).contains("nvcf_api_keys_dual_write_total{result=\""
+                        + result + "\",table=\"" + table + "\"} 0.0");
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 1, 2})
+    void createStopsAtFailedDirectWrite(int failedRow) {
+        mockSaveBatch();
+        when(cassandraBatchOperationsMock.execute()).thenThrow(batchlogTimeout());
+        var rows = List.of(KEY_BY_OWNER_AND_SERVICE_MODEL_1, KEY_BY_ACCOUNT_MODEL_1, modelMock);
+        when(cassandraTemplateMock.insert(any(), any(InsertOptions.class)))
+                .thenAnswer(invocation -> {
+                    if (rows.get(failedRow).equals(invocation.getArgument(0))) {
+                        throw writeTimeout("SIMPLE");
+                    }
+                    return null;
+                });
+
+        var ex = assertThrowsExceptionWithDetails(
+                ServiceUnavailableException.class, () -> dao.create(KEY_VO_1, KEY_OWNER_VO_1),
+                "Key storage is temporarily unavailable, the outcome of the write is unknown");
+
+        assertThat(ex.getHeaders().containsHeader(HttpHeaders.RETRY_AFTER)).isFalse();
+        var order = inOrder(cassandraTemplateMock);
+        for (var i = 0; i <= failedRow; i++) {
+            order.verify(cassandraTemplateMock).insert(rows.get(i), DIRECT_INSERT_OPTIONS);
+        }
+        for (var i = failedRow + 1; i < rows.size(); i++) {
+            verify(cassandraTemplateMock, never()).insert(eq(rows.get(i)), any(InsertOptions.class));
+        }
+        verifyNoInteractions(keyRepositoryMock, keyByOwnerAndServiceRepositoryMock);
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 1, 2})
+    void deleteStopsAtFailedDirectWrite(int failedRow) {
+        mockDeleteBatch();
+        when(cassandraBatchOperationsMock.execute()).thenThrow(batchlogTimeout());
+        var rows = List.of(expectedDeletedKeyModel,
+                KEY_BY_OWNER_AND_SERVICE_MODEL_1, KEY_BY_ACCOUNT_MODEL_1);
+        when(cassandraTemplateMock.delete(any(), any(DeleteOptions.class)))
+                .thenAnswer(invocation -> {
+                    if (rows.get(failedRow).equals(invocation.getArgument(0))) {
+                        throw writeTimeout("SIMPLE");
+                    }
+                    return null;
+                });
+
+        var ex = assertThrowsExceptionWithDetails(
+                ServiceUnavailableException.class,
+                () -> dao.deleteKey(KEY_BY_OWNER_AND_SERVICE_VO_1),
+                "Key storage is temporarily unavailable, the outcome of the write is unknown");
+
+        assertThat(ex.getHeaders().containsHeader(HttpHeaders.RETRY_AFTER)).isFalse();
+        var order = inOrder(cassandraTemplateMock);
+        for (var i = 0; i <= failedRow; i++) {
+            order.verify(cassandraTemplateMock).delete(rows.get(i), DIRECT_DELETE_OPTIONS);
+        }
+        for (var i = failedRow + 1; i < rows.size(); i++) {
+            verify(cassandraTemplateMock, never()).delete(eq(rows.get(i)), any(DeleteOptions.class));
+        }
     }
 
     private void mockBatch() {
@@ -243,6 +381,23 @@ class KeysDaoTest {
                 .thenReturn(cassandraBatchOperationsMock);
         when(cassandraBatchOperationsMock.insert(List.of(KEY_BY_OWNER_AND_SERVICE_MODEL_1)))
                 .thenReturn(cassandraBatchOperationsMock);
+        mockAccountRow();
+        when(cassandraBatchOperationsMock.insert(List.of(KEY_BY_ACCOUNT_MODEL_1)))
+                .thenReturn(cassandraBatchOperationsMock);
+    }
+
+    private void mockAccountRow() {
+        when(servicesServiceMock.toCanonicalId(SERVICE_ID_1)).thenReturn(SERVICE_ID_1);
+        when(ncaIdResolverMock.resolve(
+                KEY_BY_OWNER_AND_SERVICE_VO_1.getNcaId(),
+                KEY_BY_OWNER_AND_SERVICE_VO_1.getNcaIdInDetails())).thenReturn(NCA_ID);
+        when(keyByAccountConverterMock.voToModel(KEY_BY_ACCOUNT_VO_1))
+                .thenReturn(KEY_BY_ACCOUNT_MODEL_1);
+    }
+
+    private double writes(String table, String result) {
+        return meterRegistry.counter(
+                "nvcf_api_keys_dual_write_total", "table", table, "result", result).count();
     }
 
     private void mockDeleteBatch() {
@@ -252,6 +407,9 @@ class KeysDaoTest {
         when(cassandraBatchOperationsMock.delete(List.of(expectedDeletedKeyModel)))
                 .thenReturn(cassandraBatchOperationsMock);
         when(cassandraBatchOperationsMock.delete(List.of(KEY_BY_OWNER_AND_SERVICE_MODEL_1)))
+                .thenReturn(cassandraBatchOperationsMock);
+        mockAccountRow();
+        when(cassandraBatchOperationsMock.delete(List.of(KEY_BY_ACCOUNT_MODEL_1)))
                 .thenReturn(cassandraBatchOperationsMock);
     }
 

@@ -28,13 +28,17 @@ import com.datastax.driver.core.Session;
 import com.nvidia.apikeys.App;
 import com.nvidia.apikeys.caching.CachingKeysLoader;
 import com.nvidia.apikeys.config.IntegrationTestConfiguration;
+import com.nvidia.apikeys.persistance.dao.KeyByOwnerAndServiceModelConverter;
+import com.nvidia.apikeys.persistance.dao.KeyModelConverter;
 import com.nvidia.apikeys.persistance.dao.KeysDao;
+import com.nvidia.apikeys.vo.KeyByOwnerAndServiceVo;
 import com.nvidia.boot.exceptions.NotFoundException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.resttestclient.autoconfigure.AutoConfigureTestRestTemplate;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.data.cassandra.core.CassandraTemplate;
 import org.springframework.test.context.ContextConfiguration;
 
 @ExtendWith(IntegrationTestConfiguration.TestCleanerExtension.class)
@@ -52,17 +56,31 @@ class NcaIdRowsIntegrationTest {
     @Autowired
     private CachingKeysLoader cachingKeysLoader;
 
+    @Autowired
+    private KeyModelConverter keyConverter;
+
+    @Autowired
+    private KeyByOwnerAndServiceModelConverter ownerKeyConverter;
+
+    @Autowired
+    private CassandraTemplate cassandraTemplate;
+
     @Test
     void ncaIdsRoundTripAndStayApart() {
         var key = KEY_VO_1.toBuilder().ncaId("column-nca").ncaIdInDetails("details-nca").build();
 
-        var saved = keysDao.save(key, KEY_OWNER_VO_1);
+        cassandraTemplate.insert(keyConverter.voToModel(key));
+        cassandraTemplate.insert(ownerKeyConverter.voToModel(
+                new KeyByOwnerAndServiceVo(key, KEY_OWNER_VO_1)));
 
-        assertThat(saved.getKeyVo().getNcaId()).isEqualTo("column-nca");
-        assertThat(saved.getKeyVo().getNcaIdInDetails()).isEqualTo("details-nca");
-        assertThat(saved.getKeyByOwnerAndServiceVo().getNcaId()).isEqualTo("column-nca");
-        assertThat(saved.getKeyByOwnerAndServiceVo().getNcaIdInDetails())
-                .isEqualTo("details-nca");
+        var saved = keysDao.getKeyByHash(API_KEY_HASH_1).orElseThrow();
+        var ownerKey = keysDao.getKeyByOwnerAndServiceAndId(
+                key.getOwnerType(), key.getOwnerId(), key.getIssuerServiceId(), key.getKeyId())
+                .orElseThrow();
+        assertThat(saved.getNcaId()).isEqualTo("column-nca");
+        assertThat(saved.getNcaIdInDetails()).isEqualTo("details-nca");
+        assertThat(ownerKey.getNcaId()).isEqualTo("column-nca");
+        assertThat(ownerKey.getNcaIdInDetails()).isEqualTo("details-nca");
 
         Session session = IntegrationTestConfiguration.CQL_SESSION;
         var row = session.execute("select nca_id from " + KEY_SPACE + ".keys where api_key_hash='"

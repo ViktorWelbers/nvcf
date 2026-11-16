@@ -115,6 +115,25 @@ class KeysOperationByOwnerValidatorTest {
     }
 
     @Test
+    void validateCreateKeyRequest_storesConfiguredNcaIdOnNewKey() {
+        when(clockMock.instant()).thenReturn(TEST_TIME);
+        when(authzConverterMock.readValidAuthorizations(SERVICE_VO_1, AUTHORIZATION_JSON_NODES_1))
+                .thenReturn(KEY_AUTHZ_1);
+        when(keysDaoMock.list(USER, USER_KEY_OWNER_ID_1, SERVICE_VO_1.serviceIdAliasGroup()))
+                .thenReturn(List.of());
+        when(credentialServiceMock.generateApiKey()).thenReturn(GENERATED_KEY_VO_1);
+        when(nakPropertiesMock.getKeepAfterExpiredDuration()).thenReturn(Duration.ofDays(30));
+        when(nakPropertiesMock.getNcaId()).thenReturn("configured-nca-id");
+        when(keyRequestValidatorMock.getValidAudienceServiceIds(SERVICE_VO_1, Set.of(SERVICE_ID_1)))
+                .thenReturn(Set.of(SERVICE_ID_1));
+
+        var request = keysOperationByOwnerValidator.validateCreateKeyRequest(
+                SERVICE_VO_1, KEY_OWNER_VO_1, CREATE_KEY_REQUEST_1);
+
+        assertThat(request.getKey().getNcaId()).isEqualTo("configured-nca-id");
+    }
+
+    @Test
     void validateCreateKeyRequest_buildsValidRequestWithNoCustomAudiences() {
         when(clockMock.instant()).thenReturn(TEST_TIME);
         when(authzConverterMock.readValidAuthorizations(SERVICE_VO_1, AUTHORIZATION_JSON_NODES_1))

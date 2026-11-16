@@ -18,20 +18,30 @@
 package com.nvidia.apikeys.converters;
 
 import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.node.ArrayNode;
+import tools.jackson.databind.node.ObjectNode;
+import com.nvidia.apikeys.services.ServicesService;
 import com.nvidia.apikeys.vo.ServiceVo;
 import com.nvidia.boot.exceptions.BadRequestException;
+import lombok.RequiredArgsConstructor;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Service;
 
 @Service
+@RequiredArgsConstructor
 public class ValidatingAuthorizationsConverter {
+
+    private static final String POLICIES = "policies";
+    private static final String AUD = "aud";
+
+    private final ServicesService servicesService;
 
     public String readValidAuthorizations(ServiceVo service, JsonNode authorizationsNode) {
         if (authorizationsNode == null
                 || authorizationsNode.isMissingNode() || authorizationsNode.isNull()) {
             throw new BadRequestException("authorizations can not be null");
         }
-        String authorizations = authorizationsNode.toString();
+        String authorizations = withCanonicalAudiences(authorizationsNode).toString();
         int authorizationsLength = StringUtils.length(authorizations);
         if (authorizationsLength > service.getMaxAuthzSizeChars()) {
             throw new BadRequestException(
@@ -41,5 +51,24 @@ public class ValidatingAuthorizationsConverter {
         return authorizations;
     }
 
+    private JsonNode withCanonicalAudiences(JsonNode authorizationsNode) {
+        var policies = authorizationsNode.get(POLICIES);
+        if (policies == null || !policies.isArray()) {
+            return authorizationsNode;
+        }
+        var copy = authorizationsNode.deepCopy();
+        ((ArrayNode) copy.get(POLICIES)).forEach(policy -> {
+            if (policy instanceof ObjectNode policyNode) {
+                canonicalizeAudience(policyNode);
+            }
+        });
+        return copy;
+    }
 
+    private void canonicalizeAudience(ObjectNode policy) {
+        var aud = policy.get(AUD);
+        if (aud != null && aud.isString()) {
+            policy.put(AUD, servicesService.toCanonicalId(aud.asString()));
+        }
+    }
 }
