@@ -22,6 +22,42 @@ Out of scope for this document:
 - `/var/task` and model-cache data. They stay on SMB until the RWX backend ships.
 - Removing the SMB CSI checks and the samba image default.
 
+## The move at a glance
+
+For the secrets path, the SMB server and the SMB CSI volumes are replaced by Kubernetes Secrets
+that the kubelet projects into the instance pod. `/var/task` and model-cache data stay on SMB
+until the RWX backend ships.
+
+```mermaid
+flowchart LR
+  subgraph TODAY["Today: SMB"]
+    direction LR
+    TU["Utility pod"] -->|"writes files"| TPVC["SMB CSI volume rw"]
+    TPVC --> TSRV["SMB server pod + data PVC"]
+    TSRV --> TRO["SMB CSI volume ro"]
+    TRO --> TI["Instance pod: /var/secrets, /var/run/nvcf/info"]
+  end
+  subgraph NEXT["Native: secretBackend=k8s-native"]
+    direction LR
+    NU["Utility pod"] -->|"patch data key via API"| NS["Kubernetes Secret"]
+    NS -->|"kubelet projects, read-only"| NI["Instance pod: /var/secrets, /var/run/nvcf/info"]
+  end
+```
+
+The two backends are selected independently, so operators migrate in steps:
+
+```mermaid
+stateDiagram-v2
+  [*] --> LegacySMB
+  LegacySMB: secretBackend smb, sharedDataBackend smb
+  NativeSecrets: secretBackend k8s-native, sharedDataBackend smb
+  SMBFree: secretBackend k8s-native, sharedDataBackend rwx-pvc
+  LegacySMB --> NativeSecrets: enable native secrets
+  NativeSecrets --> SMBFree: enable RWX shared data
+  SMBFree --> NativeSecrets: roll back shared data
+  NativeSecrets --> LegacySMB: roll back secrets
+```
+
 ## What runs today
 
 NVCA creates SMB-backed volumes for each Helm workload:
@@ -119,6 +155,24 @@ A write reaches the workload only after the kubelet rewrites the projected volum
 kubelet on a default cluster has `syncFrequency: 1m` and uses the `Watch` change-detection
 strategy, so the cache is current almost immediately and the file is rewritten on the pod
 sync.
+
+The sequence below shows a metadata credential refresh and where the delay sits:
+
+```mermaid
+sequenceDiagram
+  participant W as Worker (utility pod)
+  participant CP as Control plane
+  participant API as Kubernetes API
+  participant K as Kubelet
+  participant R as Reader (instance pod)
+  W->>CP: request metadata credentials
+  CP-->>W: token + expiration (3 h)
+  W->>API: patch metadata Secret key (about 10 ms)
+  Note over API,K: kubelet pod sync, typically 20 to 80 s
+  K->>R: rewrite projected file (atomic symlink swap)
+  R->>R: re-read the file on each use
+  Note over W: next refresh at 80 percent of lifetime plus jitter
+```
 
 ### Measurements
 
