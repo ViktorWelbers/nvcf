@@ -493,10 +493,10 @@ Feature: Install a local single-cluster NVCF stack with Helmfile
         | --scopes      | invoke_function,list_functions,queue_details,list_functions_details |
 
       # Call the shadow function once directly so the LLM gateway has a route
-      # to it before the first shadow copy arrives. The 4 s delay lets Pylon
-      # finish startup calibration (its first batch sends five requests one at
-      # a time within 30 s) and stays under its 5 s canary timeout, so the idle
-      # shadow is not marked unavailable.
+      # to it before the first shadow copy arrives. The 4 s delay lets the first
+      # request of Pylon's startup calibration finish within its 5 s step limit
+      # and stays under its 5 s canary timeout, so the idle shadow is not marked
+      # unavailable.
       When I successfully invoke model "bdd-shadow" at "/v1/chat/completions" with timeout "120" seconds:
         """
         {"messages":[{"role":"user","content":"bdd-shadow-warmup"}]}

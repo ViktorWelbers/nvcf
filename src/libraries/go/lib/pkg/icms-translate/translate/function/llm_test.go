@@ -460,6 +460,7 @@ func TestNewLLMRouterClientContainer_PylonCalibrationEnv_DefaultsOnAndKeepsOverr
 			}
 			assert.Equal(t, []string{tt.expectedValue}, values)
 			assertCanonicalPylonBootstrapArgs(t, c.Args)
+			// A flag would override PYLON_BRINGUP_CALIBRATION_TIMEOUT_MS from functionEnvOverrides.
 			for _, arg := range c.Args {
 				assert.False(t, strings.HasPrefix(arg, "--bringup-calibration-timeout-ms"))
 			}
