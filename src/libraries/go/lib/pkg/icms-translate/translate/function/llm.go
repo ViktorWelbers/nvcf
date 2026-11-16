@@ -23,7 +23,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Masterminds/semver/v3"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 
@@ -43,12 +42,9 @@ const (
 	llmRouterClientImageDefault      = "nvcr.io/0651155215864979/ncp-dev/stargate-client:0.4.0"
 	llmRequestRouterAddressEnv       = "LLM_REQUEST_ROUTER_ADDRESS"
 	legacyStargateAddressEnv         = "STARGATE_ADDRESS"
-	// The first Pylon release that accepts --do-calibration together with
-	// --initial-input-tps. Older Pylons reject the pair at startup.
-	pylonCalibrationMinVersion = "0.31.0"
-	// Each model's calibration ramp ends near three times this batch timeout, so
-	// 3 s keeps the start delay to seconds instead of about 90 s at Pylon's default.
-	pylonCalibrationBatchTimeoutMs = 3000
+	// Pylon releases without a binding for this variable ignore it, so it
+	// needs no version check.
+	pylonDoCalibrationEnv = "PYLON_DO_CALIBRATION"
 
 	llmDirMountPath    = "/var/run/llm"
 	llmWorkerTokenPath = llmDirMountPath + "/worker-token"
@@ -157,20 +153,6 @@ func upstreamHealthPath(allEnvSet map[string]string) string {
 	return path
 }
 
-// isPylonCalibrationSupported reports whether the Pylon image tag is a strict
-// semver release at or above pylonCalibrationMinVersion. Strict parsing keeps
-// git SHA and numeric tags on the old arguments.
-func isPylonCalibrationSupported(image string) bool {
-	reference, _, _ := strings.Cut(image, "@")
-	_, tag, _ := strings.Cut(reference[strings.LastIndex(reference, "/")+1:], ":")
-	version, err := semver.StrictNewVersion(tag)
-	if err != nil {
-		fmt.Printf("Pylon image %q has no semver tag; not enabling Pylon calibration\n", image)
-		return false
-	}
-	return !version.LessThan(semver.MustParse(pylonCalibrationMinVersion))
-}
-
 // newLLMRouterClientContainer builds the Pylon sidecar for an LLM worker.
 func newLLMRouterClientContainer(
 	ls *LaunchSpecification,
@@ -204,6 +186,11 @@ func newLLMRouterClientContainer(
 		llmEnvSet[llmRequestRouterAddressEnv] = llmRequestRouterAddress
 	}
 	normalizeLLMRequestRouterAddressEnvAliases(llmEnvSet)
+	// Calibration replaces the --initial-input-tps seed with a measured rate.
+	// A value from the cluster's function environment overrides wins.
+	if llmEnvSet[pylonDoCalibrationEnv] == "" {
+		llmEnvSet[pylonDoCalibrationEnv] = "true"
+	}
 	// The drain must end before the inference preStop pause does, so the
 	// platform value replaces any value from the function's environment. Helm
 	// functions run Pylon in a separate pod with no pause, so they keep
@@ -249,12 +236,6 @@ func newLLMRouterClientContainer(
 		fmt.Sprintf("--auth-token-file=%s", llmWorkerTokenPath),
 		"--backend-connectivity=reverse",
 		"--initial-input-tps=100",
-	}
-	if isPylonCalibrationSupported(llmRouterClientImage) {
-		args = append(args,
-			"--do-calibration",
-			fmt.Sprintf("--bringup-calibration-timeout-ms=%d", pylonCalibrationBatchTimeoutMs),
-		)
 	}
 	// NVCF stores 1 when a deployment leaves maxRequestConcurrency unset, so a
 	// value of 1 cannot be told apart from the default. As an engine limit it

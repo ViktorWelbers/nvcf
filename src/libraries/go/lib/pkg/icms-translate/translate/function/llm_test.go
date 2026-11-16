@@ -426,30 +426,17 @@ func TestNewLLMRouterClientContainer(t *testing.T) {
 	}
 }
 
-func TestNewLLMRouterClientContainer_PylonImageTag_GatesCalibration(t *testing.T) {
+func TestNewLLMRouterClientContainer_PylonCalibrationEnv_DefaultsOnAndKeepsOverride(t *testing.T) {
 	cases := []struct {
-		name                 string
-		image                string
-		isCalibrationEnabled bool
+		name          string
+		isHelm        bool
+		override      string
+		expectedValue string
 	}{
-		{name: "above cutoff", image: "registry.example.com/nvcf/pylon:0.32.1", isCalibrationEnabled: true},
-		{name: "at cutoff", image: "registry.example.com/nvcf/pylon:0.31.0", isCalibrationEnabled: true},
-		{name: "below cutoff", image: "registry.example.com/nvcf/pylon:0.30.7", isCalibrationEnabled: false},
-		{name: "prerelease of cutoff", image: "registry.example.com/nvcf/pylon:0.31.0-rc.1", isCalibrationEnabled: false},
-		{
-			name:                 "digest after tag at cutoff",
-			image:                "registry.example.com/nvcf/pylon:0.31.0@sha256:" + strings.Repeat("a", 64),
-			isCalibrationEnabled: true,
-		},
-		{
-			name:                 "digest after tag below cutoff",
-			image:                "registry.example.com/nvcf/pylon:0.30.7@sha256:" + strings.Repeat("a", 64),
-			isCalibrationEnabled: false,
-		},
-		{name: "git SHA tag", image: "registry.example.com/nvcf/llm-router-client:1a2b3c4d", isCalibrationEnabled: false},
-		{name: "numeric non-semver tag", image: "registry.example.com/nvcf/pylon:20261105", isCalibrationEnabled: false},
-		{name: "registry port without tag", image: "registry.example.com:5000/nvcf/pylon", isCalibrationEnabled: false},
-		{name: "default image", image: "", isCalibrationEnabled: false},
+		{name: "container default", expectedValue: "true"},
+		{name: "helm default", isHelm: true, expectedValue: "true"},
+		{name: "override off", override: "false", expectedValue: "false"},
+		{name: "override on", override: "true", expectedValue: "true"},
 	}
 
 	for _, tt := range cases {
@@ -458,24 +445,23 @@ func TestNewLLMRouterClientContainer_PylonImageTag_GatesCalibration(t *testing.T
 				"LLM_REQUEST_ROUTER_ADDRESS": "llm-router.example.com:443",
 				"INFERENCE_PORT":             "8080",
 			}
-			if tt.image != "" {
-				allEnvSet["LLM_ROUTER_CLIENT_IMAGE"] = tt.image
+			if tt.override != "" {
+				allEnvSet["PYLON_DO_CALIBRATION"] = tt.override
 			}
 
-			c, err := newLLMRouterClientContainer(&LaunchSpecification{}, allEnvSet, TranslateConfig{}, "inst-1", false)
+			c, err := newLLMRouterClientContainer(&LaunchSpecification{}, allEnvSet, TranslateConfig{}, "inst-1", tt.isHelm)
 
 			require.NoError(t, err)
-			assert.Contains(t, c.Args, "--initial-input-tps=100")
-			var calibrationArgs []string
-			for _, arg := range c.Args {
-				if strings.HasPrefix(arg, "--do-calibration") || strings.HasPrefix(arg, "--bringup-calibration-timeout-ms") {
-					calibrationArgs = append(calibrationArgs, arg)
+			var values []string
+			for _, env := range c.Env {
+				if env.Name == "PYLON_DO_CALIBRATION" {
+					values = append(values, env.Value)
 				}
 			}
-			if tt.isCalibrationEnabled {
-				assert.Equal(t, []string{"--do-calibration", "--bringup-calibration-timeout-ms=3000"}, calibrationArgs)
-			} else {
-				assert.Empty(t, calibrationArgs)
+			assert.Equal(t, []string{tt.expectedValue}, values)
+			assertCanonicalPylonBootstrapArgs(t, c.Args)
+			for _, arg := range c.Args {
+				assert.False(t, strings.HasPrefix(arg, "--bringup-calibration-timeout-ms"))
 			}
 		})
 	}
