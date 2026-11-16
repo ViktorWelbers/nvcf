@@ -341,12 +341,12 @@ Limits of the move:
     driver writes `<attempt> go` if all are quiesced, else `<attempt> retry`,
     or `<attempt> abort` once the session cannot succeed: a member ended, or
     the vote has not gone 2 minutes after the first vote
-    (`internal/agent/gpushare.go` `gpushareQuiesceTimeout`). The tool rolls
-    back on `abort`, so every node stops at the same attempt. Its own
-    `--timeout-ms` deadline is wall-clock time, a minute later with
-    `--fabric-map`, for a driver that never answers; an attempt that finds a
-    pid busy takes 2 s or more, so a count of attempts would overshoot it many
-    times over.
+    (`internal/agent/gpushare.go` `gpushareQuiesceTimeout`), so every node
+    is told to stop at the same attempt. A tool that rolls back on `abort`
+    then stops at once; one that reads any verdict but `go` as `retry` goes
+    on to its own `--timeout-ms`. The tool's side (rolling back on `abort`,
+    a wall-clock deadline, and catching up ranks held mid-collective) is
+    [#3522](https://github.com/dsx-ai-factory/nvcf/pull/3522).
   - Handle exchange: after `load`, the tool writes its new fabric handles to
     `DIR/out` and waits for `DIR/in` (all nodes' `out` files concatenated) to
     re-import from at `remap`. The driver must remove `DIR/out` and `DIR/in`

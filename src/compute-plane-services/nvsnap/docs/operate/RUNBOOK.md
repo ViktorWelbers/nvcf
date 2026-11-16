@@ -192,10 +192,8 @@ three times.
   then [follow it](#following-one-capture-or-restore). The record's
   `reason` has the error: every member's, each led by what failed. A failed
   GPU tool run names each distinct error reply with how often it came (a
-  quiesce retried for its whole 2-minute timeout reads
-  `pid=… quiesce: err busy (GPU work did not drain) (N times)`, then
-  `quiesce: the vote was aborted at attempt N: rolling back` in a group or
-  `quiesce: not quiesced after N attempt(s) …: rolling back` alone). A busy
+  quiesce retried for its whole timeout reads
+  `pid=… quiesce: err busy (GPU work did not drain) (N times)`). A busy
   quiesce means the GPU work never drained: the engine kept running work,
   usually because requests (health canaries included) kept reaching it while
   it was captured.
