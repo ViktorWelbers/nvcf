@@ -655,10 +655,11 @@ static void thaw_all(struct frozen *fz, int n)
 
 /* ── Shared GPU memory (libnvsnap_gpushare control socket) ─────────────── */
 
-/* Send cmd to pid's control thread. Returns 1 if pid has none (it shares
- * no GPU memory), 0 on "ok", -2 on "busy" (retry), -3 if its library
- * predates cmd, -1 on error. */
-static int ctl(int pid, const char *cmd)
+/* Send cmd to pid's control thread; its reply goes to rep (if not NULL),
+ * and is printed unless quiet. Returns 1 if pid has none (it shares no GPU
+ * memory), 0 on "ok", -2 on "busy" (retry), -3 if its library predates
+ * cmd, -1 on error. */
+static int ctl_rep(int pid, const char *cmd, char *out, size_t outlen, int quiet)
 {
     struct sockaddr_un a = { .sun_family = AF_UNIX };
     int n = snprintf(a.sun_path + 1, sizeof(a.sun_path) - 1, GPUSHARE_SOCK_FMT, pid);
@@ -693,11 +694,14 @@ static int ctl(int pid, const char *cmd)
         else snprintf(rep, sizeof(rep), "err no reply (%s)", r < 0 ? strerror(errno) : "closed");
     }
     close(s);
-    printf("pid=%d %s: %s\n", pid, cmd, rep);
+    if (!quiet || strncmp(rep, "ok", 2)) printf("pid=%d %s: %s\n", pid, cmd, rep);
+    if (out) snprintf(out, outlen, "%s", rep);
     if (!strncmp(rep, "err busy", 8)) return -2;
     if (!strcmp(rep, "err unknown command")) return -3;
     return strncmp(rep, "ok", 2) ? -1 : 0;
 }
+
+static int ctl(int pid, const char *cmd) { return ctl_rep(pid, cmd, NULL, 0, 0); }
 
 /* Run cmd on every pid that shares GPU memory. Returns the first error
  * (see ctl), otherwise the number of pids that had a control socket. */
@@ -1130,6 +1134,77 @@ static int node_vote(int attempt, int quiesced)
     return -1;
 }
 
+static double now_ms(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec * 1e3 + t.tv_nsec / 1e6;
+}
+
+/* Bring the held ranks (see "hold" in gpushare.c) to a point where all
+ * have drained at once, then quiesce them: while any rank is busy, let one
+ * held launch through on each drained one. A drained rank has seen every
+ * collective it launched complete, so it is behind or level with every
+ * peer, and one launch at a time never takes it past them. nudge: these
+ * ranks had all drained but another node's had not (they wait for these):
+ * let one launch through on each first. Returns what ctl_all returns for
+ * "quiesce", -2 if they did not all drain (a busy rank waits for another
+ * node, or for work the gate does not hold), -1 on error. */
+static int catch_up(const int *pids, int n, int nudge)
+{
+    char rep[GPUSHARE_REPLY_MAX];
+    int *st = calloc(n, sizeof(*st));  /* -2 busy, -1 no control socket, else launches held */
+    double t0 = now_ms(), last = t0;
+    int steps = 0, r = -2;
+    for (;;) {
+        int busy = 0, err = 0;
+        for (int i = 0; i < n && !err; i++) {
+            int c = ctl_rep(pids[i], "poll", rep, sizeof(rep), 1);
+            if (c == 1) st[i] = -1;
+            else if (c < 0) err = c;
+            else if (sscanf(rep, "ok idle %d", &st[i]) != 1) st[i] = -2, busy++;
+        }
+        if (err) { r = err; break; }
+        /* One at a time: a quiescing process asks its peers' control
+         * threads about imports it has not matched yet ("whose"). */
+        if (!busy && !nudge) { r = ctl_all(pids, n, "quiesce"); break; }
+        int stepped = 0;
+        for (int i = 0; i < n && !err; i++) {
+            if (st[i] <= 0) continue;
+            int c = ctl_rep(pids[i], "step", rep, sizeof(rep), 1);
+            if (c < 0) err = c;
+            else stepped += !strcmp(rep, "ok stepped");
+        }
+        if (err) { r = err; break; }
+        nudge = 0;
+        double t = now_ms();
+        if (stepped) steps += stepped, last = t;
+        else if (t - last > 2000) break;  /* stuck */
+        else usleep(1000);
+        if (t - t0 > 10000) break;
+    }
+    printf("catch-up: %d launch(es) let through in %.0f ms: %s\n", steps, now_ms() - t0,
+           r >= 0 ? "quiesced" : r == -2 ? "busy" : "failed");
+    free(st);
+    return r;
+}
+
+/* Wait for the next whole second of the wall clock at least 300 ms away.
+ * Nodes that read a verdict at about the same time hold their ranks at the
+ * same instant, so the ranks of one node are not far ahead of another's. */
+static void wait_slot(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_REALTIME, &t);
+    t.tv_sec += t.tv_nsec >= 700000000L ? 2 : 1;
+    t.tv_nsec = 0;
+    while (clock_nanosleep(CLOCK_REALTIME, TIMER_ABSTIME, &t, NULL) == EINTR) {}
+}
+
+/* Attempts in a row that keep the ranks held (catching up across nodes)
+ * before all are let go and held again at a common instant. */
+#define HOLD_ROUNDS 8
+
 static int holder(const int *pids, int n, unsigned timeout_ms, int report_fd)
 {
     struct frozen *fz = calloc(n, sizeof(*fz));
@@ -1139,10 +1214,14 @@ static int holder(const int *pids, int n, unsigned timeout_ms, int report_fd)
     if (load_api() < 0) goto out;
 
     /* Processes that share GPU memory drop their shared mappings first:
-     * CUDA calls block once locked. "quiesce" holds the app's launches in
-     * libnvsnap_gpushare's gate (until "resume") and checks every process can
-     * release; only then does any process "release". Busy: GPU work waits on
-     * work not launched yet (e.g. a peer's NCCL kernel) — reopen and retry. */
+     * CUDA calls block once locked. "hold" holds the app's launches in
+     * libnvsnap_gpushare's gate (until "resume"), catch_up lets the ranks
+     * behind catch up, and "quiesce" checks every process can release; only
+     * then does any process "release". Busy: GPU work waits on work not
+     * launched yet (e.g. a peer's NCCL kernel on another node). With other
+     * nodes, the ranks stay held and catch up over the next attempts. A
+     * library without "hold" quiesces one process at a time: busy reopens
+     * and retries. */
     int shared = 0;
     if (fabric_dir) {  /* a previous suspend's votes */
         snprintf(path, sizeof(path), "%s/q", fabric_dir);
@@ -1150,21 +1229,39 @@ static int holder(const int *pids, int n, unsigned timeout_ms, int report_fd)
         snprintf(path, sizeof(path), "%s/d", fabric_dir);
         unlink(path);
     }
+    double t0 = now_ms();
+    int catchup = 1, holding = 0, nudge = 0;
     for (int tries = 0;; tries++) {
-        int r = ctl_all(pids, n, "quiesce");
-        if (r < 0) ctl_all(pids, n, "resume");
-        if (r < 0 && r != -2) goto out;
+        int r = -3;
+        if (catchup) {
+            if (!holding && fabric_dir) wait_slot();
+            r = ctl_all_par(pids, n, "hold");  /* after a quiesce: launches only */
+            if (r == -3) catchup = 0;  /* nothing held */
+            else if (r >= 0) holding = 1, r = catch_up(pids, n, nudge);
+        }
+        if (!catchup) r = ctl_all(pids, n, "quiesce");
+        nudge = 0;
+        if (r < 0 && r != -2) { ctl_all(pids, n, "resume"); goto out; }
+        /* Busy with no other node to wait for (or an older library): start over. */
+        if (r == -2 && (!holding || !fabric_dir)) ctl_all(pids, n, "resume"), holding = 0;
         if (fabric_dir) {  /* every node must be quiesced before any releases */
             int v = node_vote(tries, r >= 0);
-            if (v < 0) { if (r >= 0) ctl_all(pids, n, "resume"); goto out; }
+            if (v < 0) { ctl_all(pids, n, "resume"); goto out; }
             if (v == 1) { shared = r > 0; break; }
-            if (r >= 0) ctl_all(pids, n, "resume");
+            if (holding && (tries + 1) % HOLD_ROUNDS) nudge = r >= 0;  /* keep holding: catch up */
+            else {
+                if (r >= 0 || holding) ctl_all(pids, n, "resume");
+                holding = 0;
+            }
         } else if (r >= 0) {
             shared = r > 0;
             break;
         }
-        if (tries * 250 >= (int)timeout_ms) goto out;
-        usleep(250000);
+        if (now_ms() - t0 >= timeout_ms) {
+            if (holding) ctl_all(pids, n, "resume");
+            goto out;
+        }
+        if (!holding) usleep(250000);
     }
     char release[600] = "release";
     if (store_dir) snprintf(release, sizeof(release), "release %s %s%s%s", store_dir, ckpt_dir,

@@ -857,6 +857,10 @@ static pthread_mutex_t sync_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t sync_cv = PTHREAD_COND_INITIALIZER;
 static int sync_running, sync_done;
 static CUresult sync_res;
+/* Bumped when a launch passes a closed launch gate ("step") and returns:
+ * a sync started before then may not cover that launch. */
+static unsigned long launch_gen;
+static unsigned long sync_gen;  /* launch_gen when the running sync started */
 
 static void wc_thread_init(void);
 
@@ -881,15 +885,22 @@ static int timed_sync(int ms, CUresult *r)
     ts.tv_nsec += (ms % 1000) * 1000000L;
     if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
     pthread_mutex_lock(&sync_mu);
-    if (!sync_running) {
-        pthread_t t;
+    int done;
+    if (!sync_running) sync_done = 0;  /* an old result covers none of the launches since */
+    for (;;) {
+        if (!sync_running && !sync_done) {
+            pthread_t t;
+            sync_gen = __atomic_load_n(&launch_gen, __ATOMIC_SEQ_CST);
+            sync_running = pthread_create(&t, NULL, sync_main, NULL) == 0;
+            if (sync_running) pthread_detach(t);
+            else { sync_done = 1; sync_res = CUDA_ERROR_OPERATING_SYSTEM; }
+        }
+        while (!sync_done && pthread_cond_timedwait(&sync_cv, &sync_mu, &ts) == 0) {}
+        done = sync_done;
+        /* A launch went through after this sync started: sync again. */
+        if (!done || sync_gen == __atomic_load_n(&launch_gen, __ATOMIC_SEQ_CST)) break;
         sync_done = 0;
-        sync_running = pthread_create(&t, NULL, sync_main, NULL) == 0;
-        if (sync_running) pthread_detach(t);
-        else { sync_done = 1; sync_res = CUDA_ERROR_OPERATING_SYSTEM; }
     }
-    while (!sync_done && pthread_cond_timedwait(&sync_cv, &sync_mu, &ts) == 0) {}
-    int done = sync_done;
     if (done) { *r = sync_res; sync_done = 0; }
     pthread_mutex_unlock(&sync_mu);
     return done ? 0 : -1;
@@ -911,7 +922,7 @@ static int n_legacy;  /* imports through the driver's own CUDA IPC */
  * memory gate (copies, memsets, stream memory operations) and drains again.
  * Copies wait for the drain to finish before they are held: NCCL's proxy
  * thread issues copies that its kernels in flight need to complete. */
-struct gate { int closed, inflight; };
+struct gate { int closed, inflight, waiting, pass; };
 static struct gate lgate, mgate;
 static pthread_mutex_t gate_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t gate_cv = PTHREAD_COND_INITIALIZER;
@@ -924,12 +935,26 @@ static void gate_enter(struct gate *g)
         if (!__atomic_load_n(&g->closed, __ATOMIC_SEQ_CST)) return;
         __atomic_sub_fetch(&g->inflight, 1, __ATOMIC_SEQ_CST);
         pthread_mutex_lock(&gate_mu);
-        while (g->closed) pthread_cond_wait(&gate_cv, &gate_mu);
+        g->waiting++;
+        while (g->closed && !g->pass) pthread_cond_wait(&gate_cv, &gate_mu);
+        g->waiting--;
+        if (g->closed) {  /* let through by "step" */
+            g->pass--;
+            __atomic_add_fetch(&g->inflight, 1, __ATOMIC_SEQ_CST);
+            pthread_mutex_unlock(&gate_mu);
+            return;
+        }
         pthread_mutex_unlock(&gate_mu);
     }
 }
 
-static void gate_exit(struct gate *g) { __atomic_sub_fetch(&g->inflight, 1, __ATOMIC_SEQ_CST); }
+static void gate_exit(struct gate *g)
+{
+    /* A launch that ran with the gate closed (let through, or already past
+     * it when it closed): a sync must start after it to cover it. */
+    if (__atomic_load_n(&g->closed, __ATOMIC_SEQ_CST)) __atomic_add_fetch(&launch_gen, 1, __ATOMIC_SEQ_CST);
+    __atomic_sub_fetch(&g->inflight, 1, __ATOMIC_SEQ_CST);
+}
 
 /* Close the gate and wait for calls already past it. */
 static int gate_close(struct gate *g, int ms)
@@ -944,6 +969,8 @@ static void gate_open(void)
 {
     pthread_mutex_lock(&gate_mu);
     lgate.closed = mgate.closed = 0;
+    lgate.pass = mgate.pass = 0;
+    __atomic_add_fetch(&launch_gen, 1, __ATOMIC_SEQ_CST);  /* syncs running now miss what launches next */
     pthread_cond_broadcast(&gate_cv);
     pthread_mutex_unlock(&gate_mu);
 }
@@ -1114,6 +1141,71 @@ static void do_touch(char *reply, size_t n, const char *args)
     if (nr < 0) snprintf(reply, n, "err no context");
     else snprintf(reply, n, "ok read %d mapping(s) (%zu MiB) in %.2fs; at %lld.%03ld", nr, bytes >> 20, dt,
                   (long long)w.tv_sec, w.tv_nsec / 1000000);
+}
+
+/* Catching up to a consistent point. Holding every rank's launches at
+ * one instant still catches ranks at different places: a rank ahead has
+ * launched a collective that waits for the same collective on a rank
+ * behind, which the gate holds, so no drain finishes. "hold" closes the
+ * launch gate (the memory gate stays open: NCCL's proxy copies serve the
+ * kernels in flight). "poll" says whether this process's GPU work has
+ * drained. "step", on a drained process, lets one held launch through.
+ * The tool steps the drained ranks while any rank is busy, one launch at
+ * a time, so the ranks behind catch up and none passes the ones ahead;
+ * once every rank has drained at once, "quiesce" finishes. */
+static void do_hold(char *reply, size_t n)
+{
+    if (lock_ctl()) { snprintf(reply, n, "err busy (state lock)"); return; }
+    held = 0;  /* an "open" from a restore is no longer due */
+    pthread_mutex_lock(&gate_mu);
+    __atomic_store_n(&lgate.closed, 1, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&mgate.closed, 0, __ATOMIC_SEQ_CST);  /* after a "quiesce": back to holding launches only */
+    mgate.pass = 0;
+    pthread_cond_broadcast(&gate_cv);
+    pthread_mutex_unlock(&gate_mu);
+    snprintf(reply, n, "ok held");
+    pthread_mutex_unlock(&mu);
+}
+
+/* Drained: no launch is in a launch call and a sync started after the
+ * last one finished within ms. -1 on a sync error (r). */
+static int drained(int ms, CUresult *r)
+{
+    *r = CUDA_SUCCESS;
+    if (__atomic_load_n(&lgate.inflight, __ATOMIC_SEQ_CST)) return 0;
+    if (timed_sync(ms, r) < 0) return 0;
+    return *r == CUDA_SUCCESS ? 1 : -1;
+}
+
+/* "poll": "ok idle <launches held>" or "ok busy". "step": the same, and
+ * on an idle process with launches held, lets one through and waits for
+ * its launch call to return: "ok stepped". */
+static void do_poll(char *reply, size_t n, int step)
+{
+    if (lock_ctl()) { snprintf(reply, n, "err busy (state lock)"); return; }
+    CUresult r;
+    int d = lgate.closed ? drained(step ? 20 : 2, &r) : -2;
+    pthread_mutex_lock(&gate_mu);
+    int waiting = lgate.waiting;
+    if (d == 1 && step && waiting) lgate.pass = 1, pthread_cond_broadcast(&gate_cv);
+    pthread_mutex_unlock(&gate_mu);
+    pthread_mutex_unlock(&mu);
+    if (d == -2) snprintf(reply, n, "err not held");
+    else if (d < 0) snprintf(reply, n, "err synchronize: %s", errstr(r));
+    else if (!d) snprintf(reply, n, "ok busy");
+    else if (!step || !waiting) snprintf(reply, n, "ok idle %d", waiting);
+    else {
+        /* Wait for the launch to be taken and its call to return (it may
+         * block while the launch queue is full: then a poll says busy). */
+        for (int i = 0; i < 1000; i++) {
+            pthread_mutex_lock(&gate_mu);
+            int taken = !lgate.pass;
+            pthread_mutex_unlock(&gate_mu);
+            if (taken && !__atomic_load_n(&lgate.inflight, __ATOMIC_SEQ_CST)) break;
+            usleep(1000);
+        }
+        snprintf(reply, n, "ok stepped");
+    }
 }
 
 /* Hold launches, drain GPU work, and check that "release" can drop every
@@ -1979,6 +2071,9 @@ static void serve(int s)
     int fd = -1;
     if (msg_recv(s, buf, sizeof(buf), &fd) < 0) return;
     if (!strcmp(buf, "quiesce")) { do_quiesce(rep, sizeof(rep)); msg_send(s, rep, -1); }
+    else if (!strcmp(buf, "hold")) { do_hold(rep, sizeof(rep)); msg_send(s, rep, -1); }
+    else if (!strcmp(buf, "poll")) { do_poll(rep, sizeof(rep), 0); msg_send(s, rep, -1); }
+    else if (!strcmp(buf, "step")) { do_poll(rep, sizeof(rep), 1); msg_send(s, rep, -1); }
     else if (!strcmp(buf, "release")) { do_release(rep, sizeof(rep), NULL); msg_send(s, rep, -1); }
     else if (!strncmp(buf, "release ", 8)) { do_release(rep, sizeof(rep), buf + 8); msg_send(s, rep, -1); }
     else if (!strncmp(buf, "numa ", 5)) { do_numa(rep, sizeof(rep), buf + 5); msg_send(s, rep, -1); }
@@ -1998,7 +2093,8 @@ static void serve(int s)
     else if (!strncmp(buf, "ipcget ", 7)) do_ipcget(strtoull(buf + 7, NULL, 10), s);
     else msg_send(s, "err unknown command", -1);
     if (fd >= 0) close(fd);
-    if (strncmp(buf, "export", 6) && strncmp(buf, "whose", 5) && strncmp(buf, "ipcget", 6))
+    if (strncmp(buf, "export", 6) && strncmp(buf, "whose", 5) && strncmp(buf, "ipcget", 6) &&
+        strcmp(buf, "poll") && strcmp(buf, "step"))
         logf_("%s: %s", buf, rep);
 }
 
