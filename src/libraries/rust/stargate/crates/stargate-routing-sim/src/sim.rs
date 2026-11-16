@@ -22,7 +22,8 @@
 //! waits recheck at most every 25 ms until the routing wait deadline, generic
 //! no-choice retries sleep 1-9 ms while the max-wait budget remains, and
 //! Pylon queue-mismatch rejections release the reservation and reroute with
-//! the backend excluded.
+//! the backend excluded. When that rejection leaves no other backend, the
+//! request is resent once to the same backend without an expected queue time.
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashSet};
@@ -142,6 +143,7 @@ struct RequestState {
     plan: PlannedRequest,
     cache_affinity_key: String,
     excluded: HashSet<String>,
+    resent_without_estimate: bool,
     record: RequestRecord,
     engine: EngineState,
     resolved: bool,
@@ -270,6 +272,7 @@ fn request_state(plan: PlannedRequest, stargates: &[StargateView]) -> RequestSta
         },
         plan,
         excluded: HashSet::new(),
+        resent_without_estimate: false,
         engine: EngineState::NotAdmitted,
         resolved: false,
     }
@@ -563,7 +566,15 @@ impl Simulation<'_> {
         // One backend per cluster: the sibling-backend retry finds none and
         // the proxy excludes the cluster before rerouting.
         let cluster_id = self.backends[backend].id.clone();
-        self.requests[request].excluded.insert(cluster_id);
+        let state = &mut self.requests[request];
+        state.excluded.insert(cluster_id);
+        if state.excluded.len() == self.backends.len() && !state.resent_without_estimate {
+            // No other backend is left: the proxy resends once to this backend
+            // without an expected queue time, which Pylon admits.
+            state.resent_without_estimate = true;
+            self.dispatch(request, backend, None);
+            return;
+        }
         self.schedule(0, Event::RouteAttempt(request));
     }
 
@@ -935,7 +946,7 @@ mod tests {
     }
 
     #[test]
-    fn mismatch_rejections_exclude_the_only_backend_and_exhaust_retries() {
+    fn mismatch_on_the_only_backend_resends_once_without_an_estimate() {
         let mut config = config(serde_json::json!({
             "rates_rps": [1.0], "warmup_s": 1.0, "measure_s": 4.0,
             "fixed": {
@@ -946,11 +957,16 @@ mod tests {
         config.topology.regions[0].backends = 1;
         config.topology.regions[1].backends = 0;
         config.policies.retain(|policy| policy.name == "power-of-n");
+        // Long enough for the backend to drain the burst, so a request left
+        // pending instead of resent would time out and fail the test.
+        config.client.timeout_ms = 120_000;
         config.validate().expect("single-backend config is valid");
         let summary = &run_policies(&config, 60.0)[0];
         assert!(summary.mismatch_rejections > 0);
-        assert!(summary.failed_retries_exhausted > 0);
-        assert_eq!(summary.failed_no_route, 0);
+        // Pylon admits a request that carries no estimate, so the resend
+        // cannot be rejected again: at most one rejection per request.
+        assert!(summary.mismatch_rejections <= summary.offered as u64);
+        assert_eq!(summary.succeeded, summary.offered);
     }
 
     #[test]

@@ -242,15 +242,7 @@ fn burst_to_one_backend_queues_instead_of_failing() {
         serde_json::json!([[0]]),
         Some(60_000),
     );
-    for (algorithm, summary) in run_every_algorithm(&config, BURST_RATE_RPS) {
-        // With one backend, a single queue-mismatch rejection fails a
-        // wait-and-widen request even with wait budget left (issue #2567).
-        if matches!(
-            algorithm,
-            LoadBalancerAlgorithm::WaitAndWiden | LoadBalancerAlgorithm::PulsarWaitAndWiden
-        ) {
-            continue;
-        }
+    for (_, summary) in run_every_algorithm(&config, BURST_RATE_RPS) {
         let run = label(&summary);
         assert_eq!(
             summary.succeeded,
