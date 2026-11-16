@@ -176,7 +176,10 @@ namespaces, and dumps with CRIU without the CUDA plugin and with
 `--image-io-mode direct`. It moves the chunk store into
 `<checkpoint>/gpushare` and records the pids, store path and shim path in the
 checkpoint metadata. A process that uses the GPU without the shim fails the
-capture.
+capture. So does a GPU process under the shim outside the dumped session
+(an engine started with `setsid`): a workload under the library is captured
+through it or not at all, so its configuration falls back to the cachedir and
+never to the CUDA plugin (`gpushare_outside.go`).
 
 At restore, the placeholder mounts the bundle at the shim's path and the
 checkpoint's `gpushare` directory at `/nvsnap-gpushare` (the agent's

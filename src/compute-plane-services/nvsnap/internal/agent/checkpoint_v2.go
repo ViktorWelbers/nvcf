@@ -318,6 +318,14 @@ func (a *Agent) dumpV2(ctx context.Context, containerInfo *containerd.ContainerI
 	if fabricSession != "" && !gsOn {
 		return nil, errNoGPUProcess(fabricSession)
 	}
+	if !gsOn {
+		// A workload under the library is captured through it or not at
+		// all: its configuration then falls back to the cachedir, never to
+		// the CUDA plugin (gpushare_outside.go).
+		if err := gpushareOutsideSession(procBase, targetHostPID); err != nil {
+			return nil, err
+		}
+	}
 	// A multi-node session's directory lives in the pod's store and must be
 	// gone before the store is collected into the checkpoint.
 	fabricDir, closeFabric := "", func() {}

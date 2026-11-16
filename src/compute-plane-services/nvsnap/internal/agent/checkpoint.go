@@ -671,7 +671,7 @@ func (a *Agent) Checkpoint(ctx context.Context, req CheckpointRequest) (_ *Check
 	_, gpuSpan := tracing.Tracer().Start(ctx, "checkpoint.gpu_state")
 	// criu-v2: no pre-dump lock/checkpoint. The bundled cuda_plugin drives
 	// cuda-checkpoint for every GPU process during the in-namespace dump.
-	log.WithField("gpuPIDs", gpuPIDs).Info("criu-v2: GPU state handled by cuda_plugin during in-ns dump")
+	log.WithField("gpuPIDs", gpuPIDs).Info("criu-v2: GPU state is saved during the dump: by gpushare under the library, else by the CUDA plugin")
 	gpuSpan.End()
 
 	// Step 4.5: Copy all runtime-generated mapped files BEFORE CRIU dump
