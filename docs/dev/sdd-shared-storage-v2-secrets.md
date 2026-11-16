@@ -25,37 +25,56 @@ Out of scope for this document:
 ## The move at a glance
 
 For the secrets path, the SMB server and the SMB CSI volumes are replaced by Kubernetes Secrets
-that the kubelet projects into the instance pod. `/var/task` and model-cache data stay on SMB
-until the RWX backend ships.
+that the kubelet projects into the instance pod. The files appear at the same paths, so
+workloads do not change. `/var/task` and model-cache data stay on SMB until the RWX backend ships.
+
+Red boxes go away in native mode, green boxes are new, and grey boxes do not change.
 
 ```mermaid
-flowchart LR
-  subgraph TODAY["Today: SMB"]
+flowchart TB
+  subgraph TODAY["TODAY: SMB (the default)"]
     direction LR
-    TU["Utility pod"] -->|"writes files"| TPVC["SMB CSI volume rw"]
-    TPVC --> TSRV["SMB server pod + data PVC"]
-    TSRV --> TRO["SMB CSI volume ro"]
-    TRO --> TI["Instance pod: /var/secrets, /var/run/nvcf/info"]
+    A1["Utility pod writes files"] --> A2["SMB CSI volume, read-write"]
+    A2 --> A3["SMB server pod and its data PVC"]
+    A3 --> A4["SMB CSI volume, read-only"]
+    A4 --> A5["Instance pod reads /var/secrets and /var/run/nvcf/info"]
   end
-  subgraph NEXT["Native: secretBackend=k8s-native"]
+  subgraph NATIVE["NATIVE: secretBackend = k8s-native"]
     direction LR
-    NU["Utility pod"] -->|"patch data key via API"| NS["Kubernetes Secret"]
-    NS -->|"kubelet projects, read-only"| NI["Instance pod: /var/secrets, /var/run/nvcf/info"]
+    B1["Utility pod patches one key through the Kubernetes API"] --> B2["Kubernetes Secret"]
+    B2 --> B3["Kubelet projects the Secret, read-only"]
+    B3 --> B4["Instance pod reads the same two paths"]
   end
+  classDef removed fill:#fde2e2,stroke:#c0392b,color:#000
+  classDef added fill:#e2f5e2,stroke:#2e8b57,color:#000
+  classDef same fill:#ececec,stroke:#666,color:#000
+  class A2,A3,A4 removed
+  class B1,B2,B3 added
+  class A1,A5,B4 same
 ```
 
-The two backends are selected independently, so operators migrate in steps:
+| | Today (SMB) | Native secrets |
+|---|---|---|
+| Where the data lives | Files on an SMB share served by a pod | Keys in Kubernetes Secrets |
+| Extra pods and volumes for this data | SMB server pod, data PVC, SMB CSI volumes | None |
+| Needs the SMB CSI driver | Yes | No, for this path |
+| File paths seen by the workload | `/var/secrets`, `/var/run/nvcf/info` | The same |
+| How an update reaches the workload | Direct write to the shared mount (not measured) | After the kubelet syncs, about 20 to 80 seconds |
+| Still on SMB in this milestone | `/var/task`, model cache | `/var/task`, model cache |
+
+The two backends are selected independently, so operators move one step at a time and can
+roll back one step at a time:
 
 ```mermaid
 stateDiagram-v2
-  [*] --> LegacySMB
-  LegacySMB: secretBackend smb, sharedDataBackend smb
-  NativeSecrets: secretBackend k8s-native, sharedDataBackend smb
-  SMBFree: secretBackend k8s-native, sharedDataBackend rwx-pvc
-  LegacySMB --> NativeSecrets: enable native secrets
-  NativeSecrets --> SMBFree: enable RWX shared data
-  SMBFree --> NativeSecrets: roll back shared data
-  NativeSecrets --> LegacySMB: roll back secrets
+  [*] --> Legacy
+  Legacy: Legacy, everything on SMB
+  Step1: Step 1, secrets native and shared data on SMB
+  Step2: Step 2, SMB-free, secrets native and shared data on RWX
+  Legacy --> Step1: enable native secrets
+  Step1 --> Step2: enable RWX shared data
+  Step2 --> Step1: roll back shared data
+  Step1 --> Legacy: roll back secrets
 ```
 
 ## What runs today
@@ -160,6 +179,7 @@ The sequence below shows a metadata credential refresh and where the delay sits:
 
 ```mermaid
 sequenceDiagram
+  autonumber
   participant W as Worker (utility pod)
   participant CP as Control plane
   participant API as Kubernetes API
