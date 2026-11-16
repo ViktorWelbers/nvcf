@@ -1107,8 +1107,11 @@ static void undo(const int *pids, int n, int locked, int shared)
  * collectives wait for the ranks other nodes hold. So each attempt to
  * quiesce is a vote: write DIR/q ("<attempt> ok" or "<attempt> busy") and
  * wait for DIR/d, written by whoever drives the nodes once every node has
- * voted: "<attempt> go" if all are quiesced, else "<attempt> retry".
- * Returns 1 for go, 0 for retry, -1 on timeout. */
+ * voted: "<attempt> go" if all are quiesced, else "<attempt> retry", or
+ * "<attempt> abort" once the session cannot succeed (a node is gone, or the
+ * driver's quiesce deadline passed: it keeps the nodes' deadline, so they
+ * stop at the same attempt). Returns 1 for go, 0 for retry, -1 on abort or
+ * timeout. */
 static int node_vote(int attempt, int quiesced)
 {
     char q[512], tmp[520], d[512], line[64];
@@ -1127,7 +1130,13 @@ static int node_vote(int attempt, int quiesced)
             if (fgets(line, sizeof(line), fp)) sscanf(line, "%d %15s", &a, verdict);
             fclose(fp);
         }
-        if (a == attempt) return !strcmp(verdict, "go");
+        if (a == attempt) {
+            if (!strcmp(verdict, "abort")) {
+                printf("quiesce: the vote was aborted at attempt %d: rolling back\n", attempt);
+                return -1;
+            }
+            return !strcmp(verdict, "go");
+        }
         usleep(100000);
     }
     fprintf(stderr, "no verdict in %s after 600 s\n", d);
@@ -1229,7 +1238,14 @@ static int holder(const int *pids, int n, unsigned timeout_ms, int report_fd)
         snprintf(path, sizeof(path), "%s/d", fabric_dir);
         unlink(path);
     }
-    double t0 = now_ms();
+    /* The deadline is wall-clock time: an attempt takes far longer than its
+     * 250 ms pause (a busy pid waits up to 2 s to drain, a catch-up up to
+     * 10 s, and a node's vote waits for every other node's), so counting
+     * attempts let a 120 s timeout run for 27 minutes. With --fabric-map the
+     * driver ends the session at the deadline with an "abort" verdict, the
+     * same attempt on every node; this node's own deadline, a minute later,
+     * only covers a driver that never answers. */
+    double deadline = now_ms() + timeout_ms + (fabric_dir ? 60000 : 0);
     int catchup = 1, holding = 0, nudge = 0;
     for (int tries = 0;; tries++) {
         int r = -3;
@@ -1257,8 +1273,10 @@ static int holder(const int *pids, int n, unsigned timeout_ms, int report_fd)
             shared = r > 0;
             break;
         }
-        if (now_ms() - t0 >= timeout_ms) {
+        if (now_ms() >= deadline) {
             if (holding) ctl_all(pids, n, "resume");
+            printf("quiesce: not quiesced after %d attempt(s) in %u ms: rolling back\n", tries + 1,
+                   timeout_ms + (fabric_dir ? 60000 : 0));
             goto out;
         }
         if (!holding) usleep(250000);
