@@ -3639,6 +3639,33 @@ async fn shared_cluster_selects_active_backends_round_robin() {
     assert_eq!(selected.inference_server_id, "inst-b");
 }
 
+fn engine_slot_stats(num_running_queries: u64) -> ModelStats {
+    ModelStats {
+        last_mean_input_tps: 100.0,
+        max_engine_concurrency: 1,
+        num_running_queries,
+        ..ModelStats::default()
+    }
+}
+
+/// Publishes one backend update that advertises `base` and `alias`, with
+/// `base_running` requests reported on `base` and none on `alias`.
+async fn publish_base_and_alias(
+    scenario: &RegistrationScenario,
+    running: &RunningRegistration,
+    base_running: u64,
+) {
+    let mut update = scenario.update(running, "base", Active, engine_slot_stats(base_running));
+    update.models.insert(
+        "alias".to_string(),
+        InferenceServerModelRegistration {
+            stats: Some(engine_slot_stats(0)),
+            status: Active as i32,
+        },
+    );
+    scenario.publish_connected(running, &update).await;
+}
+
 // Model names advertised by one backend share its engine slots, so load on
 // one name, whether reported by the backend or still in flight, fills the
 // slot for every name.
@@ -3652,21 +3679,7 @@ async fn alias_names_on_one_backend_share_engine_slots() {
     ] {
         let scenario = RegistrationScenario::new(Some("rk-alias"));
         let running = scenario.start("inst-alias", 8888);
-        let stats = |num_running_queries| ModelStats {
-            last_mean_input_tps: 100.0,
-            max_engine_concurrency: 1,
-            num_running_queries,
-            ..ModelStats::default()
-        };
-        let mut update = scenario.update(&running, "base", Active, stats(base_running));
-        update.models.insert(
-            "alias".to_string(),
-            InferenceServerModelRegistration {
-                stats: Some(stats(0)),
-                status: Active as i32,
-            },
-        );
-        scenario.publish_connected(&running, &update).await;
+        publish_base_and_alias(&scenario, &running, base_running).await;
 
         let _held = if reserve_on_base {
             Some(
@@ -3704,26 +3717,7 @@ async fn alias_names_on_one_backend_free_engine_slots_when_load_ends() {
     ] {
         let scenario = RegistrationScenario::new(Some("rk-alias"));
         let running = scenario.start("inst-alias", 8888);
-        let stats = |num_running_queries| ModelStats {
-            last_mean_input_tps: 100.0,
-            max_engine_concurrency: 1,
-            num_running_queries,
-            ..ModelStats::default()
-        };
-        let update_with = |base_running| {
-            let mut update = scenario.update(&running, "base", Active, stats(base_running));
-            update.models.insert(
-                "alias".to_string(),
-                InferenceServerModelRegistration {
-                    stats: Some(stats(0)),
-                    status: Active as i32,
-                },
-            );
-            update
-        };
-        scenario
-            .publish_connected(&running, &update_with(base_running))
-            .await;
+        publish_base_and_alias(&scenario, &running, base_running).await;
 
         if reserve_on_base {
             scenario
@@ -3733,7 +3727,7 @@ async fn alias_names_on_one_backend_free_engine_slots_when_load_ends() {
                 .expect("active backend should accept reservation")
                 .release();
         } else {
-            scenario.publish_connected(&running, &update_with(0)).await;
+            publish_base_and_alias(&scenario, &running, 0).await;
         }
 
         for model in ["base", "alias"] {

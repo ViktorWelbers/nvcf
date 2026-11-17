@@ -27,7 +27,7 @@ use stargate_protocol::common::valid_last_mean_input_tps;
 use crate::metrics::StargateMetrics;
 
 use super::keys::RoutingTargetKey;
-use super::registration::{RegistrationClusterGeneration, RegistrationGeneration};
+use super::registration::{CapacityDomain, RegistrationClusterGeneration, RegistrationGeneration};
 use super::reservations::{
     PendingClusterReservation, RoutingReservation, apply_pending_cluster_reservations,
 };
@@ -266,8 +266,9 @@ impl ClusterRoutingGeneration {
         Some((backend_stats, rtt, active_backend_count))
     }
 
-    fn refresh_snapshot(&mut self, updated_backend_id: Option<&str>) {
+    fn refresh_snapshot(&mut self, updated_backend_id: Option<&str>, capacity: &CapacityDomain) {
         let Some((backend_stats, rtt, active_backend_count)) = self.backend_aggregate() else {
+            capacity.replace_reported_running(&mut self.capacity_share, 0);
             if let Some(state) = self.snapshot_state.take() {
                 for pending in state.pending_cluster_reservations {
                     pending.deactivate();
@@ -295,6 +296,10 @@ impl ClusterRoutingGeneration {
                     .map(|(index, _)| index)
             })
             .expect("non-empty cluster generation should have a source backend");
+        // Publish the new report before settling reservations it may include,
+        // so other model names never see the domain count too low.
+        capacity
+            .replace_reported_running(&mut self.capacity_share, backend_stats.num_running_queries);
         let source_backend = &self.backends[source_backend_index];
         let source_backend_id = source_backend.inference_server_id.clone();
         let mut pending_cluster_reservations = self
@@ -339,12 +344,6 @@ impl ClusterRoutingGeneration {
             cluster_stats_source_backend_id: source_backend_id,
             pending_cluster_reservations,
         });
-    }
-
-    fn reported_running_queries(&self) -> u64 {
-        self.snapshot_state
-            .as_ref()
-            .map_or(0, |state| state.base_snapshot.stats.num_running_queries)
     }
 
     fn routing_snapshot(&mut self) -> Option<RoutedClusterSnapshot> {
@@ -440,16 +439,8 @@ impl RoutedClusterState {
         let updated_backend_id = backend.inference_server_id.clone();
         let mut generation = self.generation.lock();
         let upsert = generation.upsert_backend(backend);
-        generation.refresh_snapshot(Some(&updated_backend_id));
-        self.publish_capacity_share(&mut generation);
+        generation.refresh_snapshot(Some(&updated_backend_id), &self.cluster_generation.capacity);
         upsert
-    }
-
-    fn publish_capacity_share(&self, generation: &mut ClusterRoutingGeneration) {
-        let running = generation.reported_running_queries();
-        self.cluster_generation
-            .capacity
-            .replace_reported_running(&mut generation.capacity_share, running);
     }
 
     pub(super) fn remove_backend(
@@ -460,8 +451,7 @@ impl RoutedClusterState {
         if !generation.remove_backend(registration) {
             return ClusterBackendRemoval::Missing;
         }
-        generation.refresh_snapshot(None);
-        self.publish_capacity_share(&mut generation);
+        generation.refresh_snapshot(None, &self.cluster_generation.capacity);
         if generation.backends.is_empty() {
             ClusterBackendRemoval::Emptied
         } else {
@@ -471,10 +461,8 @@ impl RoutedClusterState {
 
     pub(super) fn routing_snapshot(&self) -> Option<RoutedClusterSnapshot> {
         let mut snapshot = self.generation.lock().routing_snapshot()?;
-        // Every model name in the capacity domain runs on the same engine, so
-        // admission sees the domain's running count; other stats stay per name.
-        // The domain bounds each share, so this name's own count stays the
-        // floor and a saturated report stays saturated.
+        // All model names in the capacity domain share one engine. This name's
+        // own count is the floor, so a saturated report stays saturated.
         snapshot.stats.num_running_queries = snapshot
             .stats
             .num_running_queries
@@ -488,9 +476,11 @@ impl RoutedClusterState {
     pub(super) fn detach(&self) {
         let snapshot_state = {
             let mut generation = self.generation.lock();
-            let snapshot_state = generation.snapshot_state.take();
-            self.publish_capacity_share(&mut generation);
-            snapshot_state
+            let generation = &mut *generation;
+            self.cluster_generation
+                .capacity
+                .replace_reported_running(&mut generation.capacity_share, 0);
+            generation.snapshot_state.take()
         };
         for pending in snapshot_state
             .into_iter()

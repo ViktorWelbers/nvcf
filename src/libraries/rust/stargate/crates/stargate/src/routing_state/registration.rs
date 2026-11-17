@@ -165,8 +165,9 @@ impl CapacityDomain {
     /// Replaces one routed target state's share of the reported running
     /// count. `share` holds that state's last published value.
     pub(super) fn replace_reported_running(&self, share: &mut u64, running: u64) {
-        // Bounding each share keeps the shared sum from wrapping, so every
-        // share can later be subtracted exactly.
+        // Bounding each share keeps the sum from wrapping, so every share can
+        // be subtracted exactly. Adding first means a reader can only see a
+        // brief overcount, which errs toward rejecting.
         let running = running.min(u64::from(u32::MAX));
         self.reported_running.fetch_add(running, Ordering::AcqRel);
         self.reported_running.fetch_sub(*share, Ordering::AcqRel);
