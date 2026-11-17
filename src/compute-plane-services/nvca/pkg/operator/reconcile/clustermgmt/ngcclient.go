@@ -497,7 +497,7 @@ func withOTelCollectorMapper() clusterMapper {
 }
 
 func withAgentConfigMapper() clusterMapper {
-	return func(_ context.Context, _ nvidiaiov1.EnvType, src *clusterDTO, dest *Cluster) error {
+	return func(ctx context.Context, _ nvidiaiov1.EnvType, src *clusterDTO, dest *Cluster) error {
 		if src.ClusterConfigurations == nil {
 			src.ClusterConfigurations = make(CaseInsensitiveClusterConfigMap)
 		}
@@ -563,7 +563,9 @@ func withAgentConfigMapper() clusterMapper {
 				return fmt.Errorf("failed to parse container restart count to fail instance: %w", err)
 			}
 			if count < 0 {
-				return fmt.Errorf("container restart count to fail instance must not be negative, got %d", count)
+				core.GetLogger(ctx).Warnf("ignoring negative %s %d, using the NVCA default",
+					NVCAContainerRestartCountToFailInstanceConfig, count)
+				count = 0
 			}
 			containerRestartCountToFailInstance = int32(count)
 		}

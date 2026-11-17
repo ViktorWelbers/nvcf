@@ -749,7 +749,8 @@
                     "type": "integer",
                     "description": "Container restart count at which NVCA marks a function instance failed and replaces it. 0 uses the NVCA default of 3",
                     "default": 0,
-                    "minimum": 0
+                    "minimum": 0,
+                    "maximum": 2147483647
                 },
                 "secretMirrorNamespace": {
                     "type": "string",

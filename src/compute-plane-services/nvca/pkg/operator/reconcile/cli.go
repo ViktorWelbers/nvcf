@@ -479,9 +479,14 @@ func doAction(c *cli.Context) error {
 	}
 
 	restartCountToFailInstance := c.Int("nvca-container-restart-count-to-fail-instance")
-	if restartCountToFailInstance < 0 || restartCountToFailInstance > math.MaxInt32 {
-		return fmt.Errorf("nvca-container-restart-count-to-fail-instance must be between 0 and %d, got %d",
+	if restartCountToFailInstance > math.MaxInt32 {
+		return fmt.Errorf("nvca-container-restart-count-to-fail-instance must be at most %d, got %d",
 			math.MaxInt32, restartCountToFailInstance)
+	}
+	if restartCountToFailInstance < 0 {
+		log.Warnf("ignoring negative nvca-container-restart-count-to-fail-instance %d, using the NVCA default",
+			restartCountToFailInstance)
+		restartCountToFailInstance = 0
 	}
 
 	opts := &AgentOptions{
