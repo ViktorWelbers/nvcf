@@ -1640,21 +1640,24 @@ async fn wait_and_widen_rejects_alias_when_backend_is_full_on_another_name() {
         registration.start(config).expect("registration failed");
 
         let state = stargate.handle.state();
-        let target = RoutingTargetKey {
-            routing_key: None,
-            model_id: base.to_string(),
-        };
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            let candidates = state.candidates_for_target(&target).await;
-            if candidates.len() == 1 && candidates[0].stats.num_running_queries >= base_running {
-                break;
+        // One registration update upserts its models one at a time.
+        for (model, min_running) in [(base, base_running), (alias, 0)] {
+            let target = RoutingTargetKey {
+                routing_key: None,
+                model_id: model.to_string(),
+            };
+            loop {
+                let candidates = state.candidates_for_target(&target).await;
+                if candidates.len() == 1 && candidates[0].stats.num_running_queries >= min_running {
+                    break;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "{case}: {model} backend snapshot did not arrive: {candidates:?}"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
             }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "{case}: backend snapshot did not arrive: {candidates:?}"
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
         }
         if send_on_base {
             let response = ChatRequests::new(stargate.http_addr, base)
