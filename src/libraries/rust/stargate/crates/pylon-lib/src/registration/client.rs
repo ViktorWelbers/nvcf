@@ -22,6 +22,8 @@ use tokio_util::sync::CancellationToken;
 
 use stargate_runtime::{OwnedTask, TASK_SHUTDOWN_TIMEOUT};
 
+use crate::drain::{DrainCounters, DrainSummary};
+
 use super::discovery::run_watch_stargate_discovery;
 use super::grpc_endpoint::StargateGrpcEndpoint;
 use super::router_stream::run_router_registration_stream;
@@ -115,6 +117,8 @@ async fn run_registration_supervisor(
 pub struct InferenceServerRegistrationClient {
     running: Option<OwnedTask>,
     drain_timeout: Duration,
+    /// Set only for a reverse tunnel, the mode whose shutdown drains.
+    drain_counters: Option<Arc<DrainCounters>>,
 }
 
 impl InferenceServerRegistrationClient {
@@ -122,10 +126,23 @@ impl InferenceServerRegistrationClient {
         self.running = None;
     }
 
-    pub async fn shutdown(&mut self) {
-        if let Some(running) = self.running.take() {
-            running.shutdown(self.drain_timeout).await;
-        }
+    /// Drains and stops the registration session. For a reverse tunnel, it
+    /// returns what the drain did so that the caller can log it.
+    pub async fn shutdown(&mut self) -> Option<DrainSummary> {
+        let running = self.running.take()?;
+        let started = tokio::time::Instant::now();
+        let start = self
+            .drain_counters
+            .as_ref()
+            .map(|counters| counters.snapshot());
+        running.shutdown(self.drain_timeout).await;
+        let end = self.drain_counters.as_ref()?.snapshot();
+        Some(DrainSummary::between(
+            start?,
+            end,
+            started.elapsed(),
+            self.drain_timeout,
+        ))
     }
 
     pub async fn wait_for_exit(&mut self) -> std::result::Result<(), tokio::task::JoinError> {
@@ -141,6 +158,9 @@ impl InferenceServerRegistrationClient {
         self.stop();
         let config: RegistrationSessionConfig = config.try_into()?;
         self.drain_timeout = config.shutdown_drain_timeout;
+        self.drain_counters = config
+            .reverse_tunnel
+            .then(|| config.forwarding.runtime_state.drain_counters());
         self.running = Some(OwnedTask::spawn("registration session", move |stop| {
             run_registration_session(config, stop)
         }));
