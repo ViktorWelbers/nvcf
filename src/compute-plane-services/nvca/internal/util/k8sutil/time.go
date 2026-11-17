@@ -40,7 +40,7 @@ const (
 	defaultNamespaceStuckTimeout                     = 5 * time.Minute
 	defaultFailingObjectsBackoffTimeout              = 90 * time.Second
 	defaultFailingObjectsBackoffRequeueInterval      = 30 * time.Second
-	defaultContainerRestartCountToFailInstance       = RestartCountToFailInstance
+	defaultWorkerContainerRestartCountToFailInstance = RestartCountToFailInstance
 )
 
 type TimeConfig struct {
@@ -77,18 +77,18 @@ type TimeConfig struct {
 	FailingObjectsBackoffTimeout time.Duration
 	// FailingObjectsBackoffRequeueInterval is the interval to requeue reconciliation when objects are failing within the backoff period.
 	FailingObjectsBackoffRequeueInterval time.Duration
-	// ContainerRestartCountToFailInstance is the container restart count at which a Pod is considered to be in a
-	// restart loop and its instance is marked failed.
-	ContainerRestartCountToFailInstance int32
+	// WorkerContainerRestartCountToFailInstance is the NVCA worker container restart count at which a Pod is
+	// considered to be in a restart loop and its instance is marked failed. Other containers always use 3.
+	WorkerContainerRestartCountToFailInstance int32
 }
 
-// restartCountToFailInstance returns the configured restart threshold, or the default when the TimeConfig was not
-// completed. A zero threshold would mark every container as being in a restart loop.
-func (t *TimeConfig) restartCountToFailInstance() int32 {
-	if t.ContainerRestartCountToFailInstance <= 0 {
-		return defaultContainerRestartCountToFailInstance
+// workerRestartCountToFailInstance returns the configured worker container restart threshold, or the default when
+// the TimeConfig was not completed. A zero threshold would mark the worker as being in a restart loop.
+func (t *TimeConfig) workerRestartCountToFailInstance() int32 {
+	if t.WorkerContainerRestartCountToFailInstance <= 0 {
+		return defaultWorkerContainerRestartCountToFailInstance
 	}
-	return t.ContainerRestartCountToFailInstance
+	return t.WorkerContainerRestartCountToFailInstance
 }
 
 // Complete sets defaults on TimeConfig. It panics if some field is not set or defaulted.
@@ -141,8 +141,8 @@ func (t *TimeConfig) Complete() *TimeConfig {
 	if t.FailingObjectsBackoffRequeueInterval == 0 {
 		t.FailingObjectsBackoffRequeueInterval = defaultFailingObjectsBackoffRequeueInterval
 	}
-	if t.ContainerRestartCountToFailInstance <= 0 {
-		t.ContainerRestartCountToFailInstance = defaultContainerRestartCountToFailInstance
+	if t.WorkerContainerRestartCountToFailInstance <= 0 {
+		t.WorkerContainerRestartCountToFailInstance = defaultWorkerContainerRestartCountToFailInstance
 	}
 
 	// Detect unset fields, which could cause downstream errors.

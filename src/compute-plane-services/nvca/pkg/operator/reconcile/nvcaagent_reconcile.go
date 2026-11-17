@@ -2680,8 +2680,8 @@ func (bc *BackendK8sCache) newAgentConfig(ctx context.Context, nb *nvidiaiov1.NV
 	if effectiveConfig.NVCFWorkerConfig.WorkerDegradationPeriod != 0 {
 		cfg.Workload.WorkerDegradationTimeout = effectiveConfig.NVCFWorkerConfig.WorkerDegradationPeriod
 	}
-	if effectiveConfig.NVCFWorkerConfig.ContainerRestartCountToFailInstance > 0 {
-		cfg.Workload.ContainerRestartCountToFailInstance = effectiveConfig.NVCFWorkerConfig.ContainerRestartCountToFailInstance
+	if effectiveConfig.NVCFWorkerConfig.WorkerContainerRestartCountToFailInstance > 0 {
+		cfg.Workload.WorkerContainerRestartCountToFailInstance = effectiveConfig.NVCFWorkerConfig.WorkerContainerRestartCountToFailInstance
 	}
 
 	if effectiveConfig.NVCFWorkerConfig.CacheMountOptionsEnabled {

@@ -1015,10 +1015,10 @@ func TestSetupNVCADeployment_SelfHosted(t *testing.T) {
 		ngcServiceKeyFetcher: &mockTokenFetcher{token: "randomkey"},
 		envType:              nvidiaiov1.EnvTypeStage,
 		nvcfWorkerConfig: nvidiaiov1.NVCFWorkerConfig{
-			CacheMountOptionsEnabled:            true,
-			CacheMountOptions:                   "ro",
-			WorkerDegradationPeriod:             5 * time.Hour,
-			ContainerRestartCountToFailInstance: 5,
+			CacheMountOptionsEnabled:                  true,
+			CacheMountOptions:                         "ro",
+			WorkerDegradationPeriod:                   5 * time.Hour,
+			WorkerContainerRestartCountToFailInstance: 5,
 		},
 		workloadTolerations: []corev1.Toleration{{
 			Key:      "nvidia.com/test-workload",
@@ -1134,8 +1134,8 @@ func TestSetupNVCADeployment_SelfHosted(t *testing.T) {
 		},
 		Workload: nvcaconfig.WorkloadConfig{
 			WorkloadTimeConfig: nvcaconfig.WorkloadTimeConfig{
-				WorkerDegradationTimeout:            5 * time.Hour,
-				ContainerRestartCountToFailInstance: 5,
+				WorkerDegradationTimeout:                  5 * time.Hour,
+				WorkerContainerRestartCountToFailInstance: 5,
 			},
 			Tolerations: []corev1.Toleration{{
 				Key:      "nvidia.com/test-workload",
@@ -2845,20 +2845,20 @@ func TestBackendK8sCacheBuilder_WithNVCAConfig(t *testing.T) {
 	builder := NewBackendK8sCacheBuilder()
 
 	config := nvidiaiov1.NVCFWorkerConfig{
-		CacheMountOptionsEnabled:            true,
-		CacheMountOptions:                   "ro,noatime,nouuid",
-		WorkerDegradationPeriod:             2 * time.Hour,
-		ContainerRestartCountToFailInstance: 5,
+		CacheMountOptionsEnabled:                  true,
+		CacheMountOptions:                         "ro,noatime,nouuid",
+		WorkerDegradationPeriod:                   2 * time.Hour,
+		WorkerContainerRestartCountToFailInstance: 5,
 	}
 
 	newBuilder := builder.WithNVCFWorkerConfig(config.CacheMountOptionsEnabled, config.CacheMountOptions, config.WorkerDegradationPeriod,
-		config.ContainerRestartCountToFailInstance)
+		config.WorkerContainerRestartCountToFailInstance)
 
 	// Verify the builder was updated correctly
 	assert.Equal(t, config.CacheMountOptionsEnabled, newBuilder.nvcfWorkerConfig.CacheMountOptionsEnabled)
 	assert.Equal(t, config.CacheMountOptions, newBuilder.nvcfWorkerConfig.CacheMountOptions)
 	assert.Equal(t, config.WorkerDegradationPeriod, newBuilder.nvcfWorkerConfig.WorkerDegradationPeriod)
-	assert.Equal(t, config.ContainerRestartCountToFailInstance, newBuilder.nvcfWorkerConfig.ContainerRestartCountToFailInstance)
+	assert.Equal(t, config.WorkerContainerRestartCountToFailInstance, newBuilder.nvcfWorkerConfig.WorkerContainerRestartCountToFailInstance)
 
 	// Verify original builder was updated
 	assert.Equal(t, newBuilder.nvcfWorkerConfig, builder.nvcfWorkerConfig)

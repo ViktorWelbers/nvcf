@@ -98,8 +98,8 @@ func TestTimeConfigComplete(t *testing.T) {
 	if tCfg.FailingObjectsBackoffRequeueInterval != defaultFailingObjectsBackoffRequeueInterval {
 		t.Errorf("Expected FailingObjectsBackoffRequeueInterval to be %v, got %v", defaultFailingObjectsBackoffRequeueInterval, tCfg.FailingObjectsBackoffRequeueInterval)
 	}
-	if tCfg.ContainerRestartCountToFailInstance != defaultContainerRestartCountToFailInstance {
-		t.Errorf("Expected ContainerRestartCountToFailInstance to be %v, got %v", defaultContainerRestartCountToFailInstance, tCfg.ContainerRestartCountToFailInstance)
+	if tCfg.WorkerContainerRestartCountToFailInstance != defaultWorkerContainerRestartCountToFailInstance {
+		t.Errorf("Expected WorkerContainerRestartCountToFailInstance to be %v, got %v", defaultWorkerContainerRestartCountToFailInstance, tCfg.WorkerContainerRestartCountToFailInstance)
 	}
 }
 

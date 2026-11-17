@@ -65,8 +65,8 @@ const (
 	// NVCFWorkerDegradationPeriodMinutesConfig specifies the time period in minutes before a worker is considered degraded
 	NVCFWorkerDegradationPeriodMinutesConfig ClusterConfigurationKeyType = "NVCFWorkerDegradationPeriodMinutes"
 
-	// NVCAContainerRestartCountToFailInstanceConfig specifies the container restart count at which NVCA marks a function instance failed
-	NVCAContainerRestartCountToFailInstanceConfig ClusterConfigurationKeyType = "NVCAContainerRestartCountToFailInstance"
+	// NVCAWorkerContainerRestartCountToFailInstanceConfig specifies the container restart count at which NVCA marks a function instance failed
+	NVCAWorkerContainerRestartCountToFailInstanceConfig ClusterConfigurationKeyType = "NVCAWorkerContainerRestartCountToFailInstance"
 
 	// NVCASecretMirrorSourceNamespaceConfig specifies the source namespace from which secrets should be mirrored to function namespaces
 	NVCASecretMirrorSourceNamespaceConfig ClusterConfigurationKeyType = "NVCASecretMirrorSourceNamespace"
@@ -91,16 +91,16 @@ func (m *CaseInsensitiveClusterConfigMap) UnmarshalJSON(data []byte) error {
 
 	// Build a lookup map of lowercase known keys to their canonical forms
 	knownKeys := map[string]ClusterConfigurationKeyType{
-		strings.ToLower(string(AgentNodeSelectorLabelKeyConfig)):               AgentNodeSelectorLabelKeyConfig,
-		strings.ToLower(string(AgentNodeSelectorLabelValueConfig)):             AgentNodeSelectorLabelValueConfig,
-		strings.ToLower(string(AgentPriorityClassNameConfig)):                  AgentPriorityClassNameConfig,
-		strings.ToLower(string(ModelCacheVolumeMountOptionEnabledConfig)):      ModelCacheVolumeMountOptionEnabledConfig,
-		strings.ToLower(string(ModelCacheVolumeMountOptionsConfig)):            ModelCacheVolumeMountOptionsConfig,
-		strings.ToLower(string(ClusterNetworkCIDRAllowedRangeConfig)):          ClusterNetworkCIDRAllowedRangeConfig,
-		strings.ToLower(string(NVCFWorkerDegradationPeriodMinutesConfig)):      NVCFWorkerDegradationPeriodMinutesConfig,
-		strings.ToLower(string(NVCASecretMirrorSourceNamespaceConfig)):         NVCASecretMirrorSourceNamespaceConfig,
-		strings.ToLower(string(NVCASecretMirrorLabelSelectorConfig)):           NVCASecretMirrorLabelSelectorConfig,
-		strings.ToLower(string(NVCAContainerRestartCountToFailInstanceConfig)): NVCAContainerRestartCountToFailInstanceConfig,
+		strings.ToLower(string(AgentNodeSelectorLabelKeyConfig)):                     AgentNodeSelectorLabelKeyConfig,
+		strings.ToLower(string(AgentNodeSelectorLabelValueConfig)):                   AgentNodeSelectorLabelValueConfig,
+		strings.ToLower(string(AgentPriorityClassNameConfig)):                        AgentPriorityClassNameConfig,
+		strings.ToLower(string(ModelCacheVolumeMountOptionEnabledConfig)):            ModelCacheVolumeMountOptionEnabledConfig,
+		strings.ToLower(string(ModelCacheVolumeMountOptionsConfig)):                  ModelCacheVolumeMountOptionsConfig,
+		strings.ToLower(string(ClusterNetworkCIDRAllowedRangeConfig)):                ClusterNetworkCIDRAllowedRangeConfig,
+		strings.ToLower(string(NVCFWorkerDegradationPeriodMinutesConfig)):            NVCFWorkerDegradationPeriodMinutesConfig,
+		strings.ToLower(string(NVCASecretMirrorSourceNamespaceConfig)):               NVCASecretMirrorSourceNamespaceConfig,
+		strings.ToLower(string(NVCASecretMirrorLabelSelectorConfig)):                 NVCASecretMirrorLabelSelectorConfig,
+		strings.ToLower(string(NVCAWorkerContainerRestartCountToFailInstanceConfig)): NVCAWorkerContainerRestartCountToFailInstanceConfig,
 	}
 
 	// Normalize keys by matching them case-insensitively to known keys

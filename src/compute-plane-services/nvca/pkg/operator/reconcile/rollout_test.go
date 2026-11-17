@@ -1324,10 +1324,10 @@ func TestHasAgentWorkerConfigChanged_DynamicConfigNoRepeatedRollout(t *testing.T
 			version:        "v2.44.0",
 			bcWorkerConfig: nvidiaiov1.NVCFWorkerConfig{},
 			nbSpecWorkerConfig: nvidiaiov1.NVCFWorkerConfig{
-				CacheMountOptionsEnabled:            true,
-				CacheMountOptions:                   "local",
-				WorkerDegradationPeriod:             300000000000,
-				ContainerRestartCountToFailInstance: 5,
+				CacheMountOptionsEnabled:                  true,
+				CacheMountOptions:                         "local",
+				WorkerDegradationPeriod:                   300000000000,
+				WorkerContainerRestartCountToFailInstance: 5,
 			},
 			nbStatusWorkerConfig: nvidiaiov1.NVCFWorkerConfig{
 				CacheMountOptionsEnabled: true,
