@@ -1190,6 +1190,23 @@ func hasGrpcProxyEvents(events []data_access.EventV3UpsertRecord) bool {
 	return false
 }
 
+func statsV3BatchSelect(namespace string, contexts []string, accountColumnsEnabled, readAccountColumns bool) (string, []any) {
+	columns := "context, created_at, timestamp"
+	if accountColumnsEnabled {
+		columns += ", nca_id, function_id"
+	} else if readAccountColumns {
+		// SELECT * also works against keyspaces that predate the account columns.
+		columns = "*"
+	}
+	args := make([]any, 0, len(contexts)+1)
+	args = append(args, namespace)
+	for _, eventContext := range contexts {
+		args = append(args, eventContext)
+	}
+	return "SELECT " + columns + " FROM stats_v3 WHERE namespace = ? AND context IN (" +
+		strings.TrimSuffix(strings.Repeat("?, ", len(contexts)), ", ") + ")", args
+}
+
 // A conditional batch can refresh both the stats columns and the INSERT row
 // marker, which a conditional UPDATE alone cannot replace.
 func statsV3UpdateStatement(table, setClause, namespace, eventContext string, args []any, ttl int) (string, []any) {
@@ -1335,7 +1352,7 @@ func (c *CassandraHandler) BulkUpsertStatsV3(traceCtx context.Context, events []
 		return nil
 	}
 
-	// Dedup to latest event per (namespace, context) — stats_v3 holds only one row per pair.
+	// Dedup to latest event per (namespace, context); stats_v3 holds only one row per pair.
 	type statsKey struct{ namespace, context string }
 	latest := make(map[statsKey]data_access.EventV3UpsertRecord)
 	for _, ev := range events {
@@ -1374,14 +1391,13 @@ func (c *CassandraHandler) upsertPartitionStatsV3(traceCtx context.Context, name
 	logger := logging.GetLogger(traceCtx)
 
 	return c.executeWithSessionRecreation(traceCtx, func() error {
-		selectQuery := `SELECT context, created_at, timestamp FROM stats_v3 WHERE namespace = ?`
-		readAccountColumns := c.v3Retention.AccountColumnsEnabled || hasGrpcProxyEvents(events)
-		if c.v3Retention.AccountColumnsEnabled {
-			selectQuery = `SELECT context, created_at, timestamp, nca_id, function_id FROM stats_v3 WHERE namespace = ?`
-		} else if readAccountColumns {
-			selectQuery = `SELECT * FROM stats_v3 WHERE namespace = ?`
+		contexts := make([]string, 0, len(events))
+		for _, ev := range events {
+			contexts = append(contexts, ev.Context)
 		}
-		iter := c.session.Query(selectQuery, namespace).WithContext(traceCtx).Iter()
+		readAccountColumns := c.v3Retention.AccountColumnsEnabled || hasGrpcProxyEvents(events)
+		selectQuery, selectArgs := statsV3BatchSelect(namespace, contexts, c.v3Retention.AccountColumnsEnabled, readAccountColumns)
+		iter := c.session.Query(selectQuery, selectArgs...).WithContext(traceCtx).Iter()
 		existingCreatedAt := make(map[string]time.Time)
 		existingTimestamp := make(map[string]time.Time)
 		existingNcaID := make(map[string]string)

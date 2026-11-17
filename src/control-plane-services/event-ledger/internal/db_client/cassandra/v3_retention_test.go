@@ -60,3 +60,22 @@ func TestGrpcProxyStatsUpdateRefreshesRowMarker(t *testing.T) {
 		})
 	}
 }
+
+func TestStatsV3BatchSelectRestrictsContexts(t *testing.T) {
+	for _, tt := range []struct {
+		name                  string
+		accountColumnsEnabled bool
+		readAccountColumns    bool
+		columns               string
+	}{
+		{"legacy", false, false, "context, created_at, timestamp"},
+		{"account columns", true, true, "context, created_at, timestamp, nca_id, function_id"},
+		{"proxy during rollback", false, true, "*"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			query, args := statsV3BatchSelect("ns", []string{"ctx-1", "ctx-2"}, tt.accountColumnsEnabled, tt.readAccountColumns)
+			require.Equal(t, "SELECT "+tt.columns+" FROM stats_v3 WHERE namespace = ? AND context IN (?, ?)", query)
+			require.Equal(t, []any{"ns", "ctx-1", "ctx-2"}, args)
+		})
+	}
+}
