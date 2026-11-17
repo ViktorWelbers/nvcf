@@ -14,7 +14,7 @@
 // limitations under the License.
 
 use super::registration::{
-    RegistrationClusterGeneration, test_registration_generation,
+    CapacityDomain, RegistrationClusterGeneration, test_registration_generation,
     test_registration_generation_in_cluster,
 };
 use super::reservations::{UNEXPIRING_TEST_RESERVATION_TTL, update_reserved_priority_queue_time};
@@ -3740,4 +3740,40 @@ async fn alias_names_on_one_backend_free_engine_slots_when_load_ends() {
             );
         }
     }
+}
+
+// One request is always running while the writer moves it between "routed,
+// not yet reported" and "reported", so a concurrent read must never be 0.
+#[test]
+fn capacity_domain_read_never_misses_a_running_request() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let domain = Arc::new(CapacityDomain::default());
+    let stop = Arc::new(AtomicBool::new(false));
+    domain.reservation_started();
+    let reader = {
+        let (domain, stop) = (Arc::clone(&domain), Arc::clone(&stop));
+        std::thread::spawn(move || {
+            let mut zero_reads = 0_u64;
+            while !stop.load(Ordering::Acquire) {
+                if domain.running_queries() == 0 {
+                    zero_reads += 1;
+                }
+            }
+            zero_reads
+        })
+    };
+
+    let mut share = 0;
+    for _ in 0..200_000 {
+        // Pylon reports the request, then its reservation settles.
+        domain.replace_reported_running(&mut share, 1);
+        domain.reservation_ended();
+        // A new request is routed, then Pylon reports the old one finished.
+        domain.reservation_started();
+        domain.replace_reported_running(&mut share, 0);
+    }
+    stop.store(true, Ordering::Release);
+
+    assert_eq!(reader.join().expect("reader thread panicked"), 0);
 }

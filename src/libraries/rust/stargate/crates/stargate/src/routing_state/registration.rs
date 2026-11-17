@@ -70,10 +70,10 @@ pub(super) struct RegistrationClusterGeneration {
 /// name, so the sum over names is the engine's running count.
 #[derive(Debug, Default)]
 pub(super) struct CapacityDomain {
-    // Sum of the running counts that each routed target state last reported.
-    reported_running: AtomicU64,
-    // Reservations routed under any name and not yet settled.
-    pending_reservations: AtomicU64,
+    // The running counts that each routed target state last reported, plus
+    // reservations routed under any name and not yet settled. One atomic, so
+    // a reader never combines two counts taken at different times.
+    running_queries: AtomicU64,
 }
 
 #[derive(Debug)]
@@ -157,9 +157,7 @@ impl CapacityDomain {
     /// Running requests on the engine: reported by its backends, plus
     /// requests routed to it that no backend has reported yet.
     pub(super) fn running_queries(&self) -> u64 {
-        self.reported_running
-            .load(Ordering::Acquire)
-            .saturating_add(self.pending_reservations.load(Ordering::Acquire))
+        self.running_queries.load(Ordering::Acquire)
     }
 
     /// Replaces one routed target state's share of the reported running
@@ -169,17 +167,17 @@ impl CapacityDomain {
         // be subtracted exactly. Adding first means a reader can only see a
         // brief overcount, which errs toward rejecting.
         let running = running.min(u64::from(u32::MAX));
-        self.reported_running.fetch_add(running, Ordering::AcqRel);
-        self.reported_running.fetch_sub(*share, Ordering::AcqRel);
+        self.running_queries.fetch_add(running, Ordering::AcqRel);
+        self.running_queries.fetch_sub(*share, Ordering::AcqRel);
         *share = running;
     }
 
     pub(super) fn reservation_started(&self) {
-        self.pending_reservations.fetch_add(1, Ordering::AcqRel);
+        self.running_queries.fetch_add(1, Ordering::AcqRel);
     }
 
     pub(super) fn reservation_ended(&self) {
-        self.pending_reservations.fetch_sub(1, Ordering::AcqRel);
+        self.running_queries.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
