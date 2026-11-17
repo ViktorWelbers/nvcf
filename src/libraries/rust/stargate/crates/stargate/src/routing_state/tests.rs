@@ -3746,32 +3746,40 @@ async fn alias_names_on_one_backend_free_engine_slots_when_load_ends() {
 // not yet reported" and "reported", so a concurrent read must never be 0.
 #[test]
 fn capacity_domain_read_never_misses_a_running_request() {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     let domain = Arc::new(CapacityDomain::default());
     let stop = Arc::new(AtomicBool::new(false));
+    let reads = Arc::new(AtomicU64::new(0));
     domain.reservation_started();
     let reader = {
-        let (domain, stop) = (Arc::clone(&domain), Arc::clone(&stop));
+        let (domain, stop, reads) = (Arc::clone(&domain), Arc::clone(&stop), Arc::clone(&reads));
         std::thread::spawn(move || {
             let mut zero_reads = 0_u64;
             while !stop.load(Ordering::Acquire) {
                 if domain.running_queries() == 0 {
                     zero_reads += 1;
                 }
+                reads.fetch_add(1, Ordering::Relaxed);
             }
             zero_reads
         })
     };
 
+    // Keep writing until the reader has run, so the test cannot pass without
+    // concurrent reads.
     let mut share = 0;
-    for _ in 0..200_000 {
+    let mut cycles = 0;
+    while cycles < 200_000 || reads.load(Ordering::Relaxed) < 10_000 {
         // Pylon reports the request, then its reservation settles.
         domain.replace_reported_running(&mut share, 1);
         domain.reservation_ended();
+        // Pylon reports the same request again, with no reservation left.
+        domain.replace_reported_running(&mut share, 1);
         // A new request is routed, then Pylon reports the old one finished.
         domain.reservation_started();
         domain.replace_reported_running(&mut share, 0);
+        cycles += 1;
     }
     stop.store(true, Ordering::Release);
 
