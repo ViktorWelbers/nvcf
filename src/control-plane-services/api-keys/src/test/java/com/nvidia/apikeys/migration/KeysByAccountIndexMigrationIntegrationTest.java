@@ -1,0 +1,464 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.nvidia.apikeys.migration;
+
+import static com.nvidia.apikeys.TestData.KEY_BY_OWNER_AND_SERVICE_VO_1;
+import static com.nvidia.apikeys.TestData.KEY_VO_1;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.spy;
+
+import com.datastax.oss.driver.api.core.CqlSession;
+import com.nvidia.apikeys.App;
+import com.nvidia.apikeys.config.IntegrationTestConfiguration;
+import com.nvidia.apikeys.config.KeysByAccountIndexMigrationProperties;
+import com.nvidia.apikeys.config.NakProperties;
+import com.nvidia.apikeys.facade.AdminFacade;
+import com.nvidia.apikeys.persistance.dao.KeysByAccountIndexMigrationDao;
+import com.nvidia.apikeys.persistance.dao.RowUpdateLockDao;
+import com.nvidia.apikeys.persistance.models.KeyByOwnerAndAccountAndServiceModel;
+import com.nvidia.apikeys.persistance.models.KeyByOwnerAndServiceModel;
+import com.nvidia.apikeys.persistance.models.KeyModel;
+import com.nvidia.apikeys.services.ServicesService;
+import com.nvidia.apikeys.vo.KeyByOwnerAndAccountAndServiceVo;
+import com.nvidia.apikeys.vo.KeyByOwnerAndServiceVo;
+import com.nvidia.apikeys.vo.KeyStatus;
+import com.nvidia.apikeys.vo.KeyVo;
+import com.nvidia.boot.jwt.services.mapping.EncryptedModelConverter;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import io.opentelemetry.api.OpenTelemetry;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import net.javacrumbs.shedlock.core.DefaultLockingTaskExecutor;
+import net.javacrumbs.shedlock.core.LockAssert;
+import net.javacrumbs.shedlock.core.LockConfiguration;
+import net.javacrumbs.shedlock.core.LockExtender;
+import net.javacrumbs.shedlock.core.LockProvider;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.resttestclient.autoconfigure.AutoConfigureTestRestTemplate;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.data.cassandra.core.CassandraTemplate;
+import org.springframework.data.cassandra.core.DeleteOptions;
+import org.springframework.data.cassandra.core.InsertOptions;
+import org.springframework.test.context.ContextConfiguration;
+
+@ExtendWith(IntegrationTestConfiguration.TestCleanerExtension.class)
+@AutoConfigureTestRestTemplate
+@SpringBootTest(classes = App.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
+        properties = "spring.profiles.active=integrationtest")
+@ContextConfiguration(initializers = IntegrationTestConfiguration.Initializer.class)
+class KeysByAccountIndexMigrationIntegrationTest {
+    @Autowired
+    private CassandraTemplate template;
+    @Autowired
+    private CqlSession session;
+    @Autowired
+    private KeysByAccountIndexMigrationDao dao;
+    @Autowired
+    private RowUpdateLockDao markers;
+    @Autowired
+    private NakProperties properties;
+    @Autowired
+    private ServicesService services;
+    @Autowired
+    private OpenTelemetry telemetry;
+    @Autowired
+    private LockProvider lockProvider;
+    @Autowired
+    private AdminFacade adminFacade;
+    @Autowired
+    private KeysByAccountIndexMigrationScheduler scheduler;
+    @Autowired
+    private EncryptedModelConverter<KeyByOwnerAndServiceModel, KeyByOwnerAndServiceVo> ownerConverter;
+    @Autowired
+    private EncryptedModelConverter<KeyByOwnerAndAccountAndServiceModel,
+            KeyByOwnerAndAccountAndServiceVo> accountConverter;
+    @Autowired
+    private EncryptedModelConverter<KeyModel, KeyVo> credentialConverter;
+
+    private KeysByAccountIndexMigrationProperties savedConfig;
+    private String savedNcaId;
+    private long timestamp;
+    private SimpleMeterRegistry registry;
+
+    @BeforeEach
+    void configure() {
+        savedConfig = properties.getMigration().getKeysByAccountIndex();
+        savedNcaId = properties.getNcaId();
+        properties.getMigration().setKeysByAccountIndex(KeysByAccountIndexMigrationProperties.builder()
+                .pageSize(1).batchDelay(Duration.ZERO).settleDelay(Duration.ofMillis(1)).build());
+        timestamp = Instant.now().minusSeconds(600).toEpochMilli() * 1000;
+        registry = new SimpleMeterRegistry();
+    }
+
+    @AfterEach
+    void restore() {
+        properties.getMigration().setKeysByAccountIndex(savedConfig);
+        properties.setNcaId(savedNcaId);
+        registry.close();
+    }
+
+    @Test
+    void copiesRawEncryptedLegacyRowsAndKeepsCredentialDetailsAndStaticStatus() {
+        var source = source().toBuilder().createdAt(Instant.parse("2023-10-03T08:25:24.123456789Z")).build();
+        seed(source, true);
+        var credentialBefore = dao.credential(source.getKeyHash()).orElseThrow().model();
+        session.execute("UPDATE keys_by_owner_and_service USING TIMESTAMP ? SET owner_status=? "
+                + "WHERE owner_type=? AND owner_id=?", timestamp + 10000, "SUSPENDED",
+                source.getOwnerType().name(), source.getOwnerId());
+        var task = task(dao);
+
+        task.run(() -> { });
+
+        var copied = account(source);
+        assertThat(copied.getKeyStatus()).isEqualTo(KeyStatus.ACTIVE);
+        assertThat(copied.getCreatedAt()).isEqualTo(source.getCreatedAt().truncatedTo(ChronoUnit.MILLIS));
+        assertThat(copied.getExpiresAt()).isEqualTo(source.getExpiresAt());
+        assertThat(copied.getDeletesAt()).isEqualTo(source.getDeletesAt());
+        assertThat(copied.getIssuerServiceId()).isEqualTo(services.toCanonicalId(source.getIssuerServiceId()));
+        assertThat(copied.getAudienceServiceIds()).isEqualTo(Set.of(
+                services.toCanonicalId(source.getIssuerServiceId())));
+        assertThat(copied.getNcaIdInDetails()).isEqualTo(savedNcaId);
+        assertThat(dao.account(accountModel(source)).orElseThrow().timestamp()).isEqualTo(timestamp);
+        assertThat(dao.ownerPage(null, 10).rows().getFirst().timestamp()).isEqualTo(timestamp);
+        var credentialAfter = dao.credential(source.getKeyHash()).orElseThrow();
+        assertThat(credentialAfter.model().getNcaId()).isEqualTo(savedNcaId);
+        assertThat(credentialAfter.model().getKeyDetails()).isEqualTo(credentialBefore.getKeyDetails());
+        assertThat(credentialAfter.timestamp()).isEqualTo(timestamp);
+        assertThat(completed()).isFalse();
+
+        task.run(() -> { });
+        assertThat(completed()).isTrue();
+        assertThat(result("already_copied")).isEqualTo(2);
+    }
+
+    @Test
+    void pagesAcrossKeysAndSkipsPartitionsThatOnlyHoldUserStatus() {
+        for (var i = 0; i < 4; i++) {
+            seed(source().toBuilder().keyId("key-" + i).keyHash("hash-" + i).build(), true);
+        }
+        session.execute("UPDATE keys_by_owner_and_service SET owner_status=? "
+                + "WHERE owner_type=? AND owner_id=?", "ACTIVE", "USER", "status-only");
+        var task = task(dao);
+
+        task.run(() -> { });
+
+        for (var i = 0; i < 4; i++) {
+            assertThat(account(source().toBuilder().keyId("key-" + i).keyHash("hash-" + i).build())
+                    .getKeyId()).isEqualTo("key-" + i);
+        }
+        assertThat(result("copied")).isEqualTo(4);
+        assertThat(result("skipped")).isEqualTo(1);
+        assertThat(completed()).isFalse();
+        task.run(() -> { });
+        assertThat(completed()).isTrue();
+    }
+
+    @Test
+    void unknownIssuerAndLegacyOnlyPartialCreateAreCopiedWithoutFabricatingCredential() {
+        var source = source().toBuilder().issuerServiceId("unregistered-issuer").build();
+        seed(source, false);
+
+        task(dao).run(() -> { });
+
+        assertThat(account(source).getIssuerServiceId()).isEqualTo("unregistered-issuer");
+        assertThat(dao.credential(source.getKeyHash())).isEmpty();
+        assertThat(result("unmapped")).isEqualTo(1);
+        assertThat(adminFacade.listKeysInAllServices(source.getOwnerType(), source.getOwnerId()).getKeys())
+                .extracting("id").containsExactly(source.getKeyId());
+        task(dao).run(() -> { });
+        assertThat(completed()).isTrue();
+    }
+
+    @Test
+    void assignmentsSurviveConfigurationChangesAndConflictsBlockCompletion() {
+        var source = source().toBuilder().ncaId("assigned").ncaIdInDetails("assigned").build();
+        seed(source, true);
+        properties.setNcaId("new-default");
+
+        task(dao).run(() -> { });
+
+        var target = accountModel(source).toBuilder().ncaId("assigned").build();
+        assertThat(dao.account(target)).isPresent();
+        assertThat(dao.credential(source.getKeyHash()).orElseThrow().model().getNcaId()).isEqualTo("assigned");
+        assertThat(dao.account(accountModel(source))).isEmpty();
+        session.execute("UPDATE keys USING TIMESTAMP ? SET nca_id=? WHERE api_key_hash=?",
+                timestamp + 1, "conflicting", source.getKeyHash());
+
+        task(dao).run(() -> { });
+
+        assertThat(result("conflict")).isEqualTo(1);
+        assertThat(completed()).isFalse();
+        assertThat(dao.credential(source.getKeyHash()).orElseThrow().model().getNcaId()).isEqualTo("conflicting");
+        assertThat(dao.account(target).orElseThrow().timestamp()).isEqualTo(timestamp);
+    }
+
+    @Test
+    void credentialAssignmentIsKeptAfterTheDefaultChangesAndStaleAccountIsRepaired() {
+        var source = source();
+        seed(source, true);
+        session.execute("UPDATE keys USING TIMESTAMP ? SET nca_id=? WHERE api_key_hash=?",
+                timestamp, "assigned", source.getKeyHash());
+        properties.setNcaId("new-default");
+        var stale = target(source).toBuilder().ncaId("assigned").ncaIdInDetails(null)
+                .description("stale").build();
+        dao.copy(accountConverter.voToModel(stale), timestamp - 1);
+
+        task(dao).run(() -> { });
+
+        var copied = accountConverter.modelToVo(dao.account(accountConverter.voToModel(stale))
+                .orElseThrow().model());
+        assertThat(copied.getNcaId()).isEqualTo("assigned");
+        assertThat(copied.getNcaIdInDetails()).isEqualTo("assigned");
+        assertThat(copied.getDescription()).isEqualTo(source.getDescription());
+        assertThat(dao.credential(source.getKeyHash()).orElseThrow().model().getNcaId()).isEqualTo("assigned");
+        task(dao).run(() -> { });
+        assertThat(completed()).isTrue();
+    }
+
+    @Test
+    void restartAfterPartialPageAndLaterLegacyWritesConvergeEvenAfterM0() {
+        var first = source();
+        seed(first, true);
+        var interrupted = spy(dao);
+        doAnswer(call -> { throw new IllegalStateException("restart before account scan"); })
+                .when(interrupted).accountPage(any(), anyInt());
+        task(interrupted).run(() -> { });
+        assertThat(completed()).isFalse();
+
+        task(dao).run(() -> { });
+        assertThat(completed()).isTrue();
+        var second = first.toBuilder().keyId("second-key").keyHash("second-hash").build();
+        seed(second, true);
+        task(dao).run(() -> { });
+        assertThat(account(second).getKeyId()).isEqualTo("second-key");
+        assertThat(completed()).isTrue();
+    }
+
+    @Test
+    void concurrentSuspendWinsOverStaleCopyAndIsRepairedOnNextScan() {
+        var source = source();
+        seed(source, true);
+        var racing = spy(dao);
+        doAnswer(call -> {
+            var updated = source.toBuilder().keyStatus(KeyStatus.SUSPENDED).description("concurrent update").build();
+            template.insert(ownerConverter.voToModel(updated), insertAt(timestamp + 10));
+            dao.copy(accountConverter.voToModel(target(updated)), timestamp + 10);
+            return call.callRealMethod();
+        }).when(racing).copy(any(), anyLong());
+
+        task(racing).run(() -> { });
+
+        assertThat(account(source).getKeyStatus()).isEqualTo(KeyStatus.SUSPENDED);
+        assertThat(account(source).getDescription()).isEqualTo("concurrent update");
+        assertThat(result("retry")).isEqualTo(1);
+        assertThat(completed()).isFalse();
+        task(dao).run(() -> { });
+        assertThat(completed()).isFalse();
+        task(dao).run(() -> { });
+        assertThat(completed()).isTrue();
+    }
+
+    @Test
+    void concurrentDeleteWinsOverStaleCopyAndNeverResurrectsCredential() {
+        var source = source();
+        seed(source, true);
+        var racing = spy(dao);
+        doAnswer(call -> {
+            template.delete(ownerConverter.voToModel(source), deleteAt(timestamp + 10));
+            template.delete(accountModel(source), deleteAt(timestamp + 10));
+            template.delete(KeyModel.builder().keyHash(source.getKeyHash()).build(), deleteAt(timestamp + 10));
+            return call.callRealMethod();
+        }).when(racing).copy(any(), anyLong());
+
+        task(racing).run(() -> { });
+
+        assertThat(dao.account(accountModel(source))).isEmpty();
+        assertThat(dao.credential(source.getKeyHash())).isEmpty();
+        assertThat(result("retry")).isEqualTo(1);
+        assertThat(completed()).isFalse();
+    }
+
+    @Test
+    void credentialDeleteAfterReadDefeatsNcaOnlyUpdate() {
+        var source = source();
+        seed(source, true);
+        var racing = spy(dao);
+        doAnswer(call -> {
+            template.delete(KeyModel.builder().keyHash(source.getKeyHash()).build(), deleteAt(timestamp + 10));
+            return call.callRealMethod();
+        }).when(racing).setCredentialNcaId(anyString(), anyString(), anyLong());
+
+        task(racing).run(() -> { });
+
+        assertThat(dao.credential(source.getKeyHash())).isEmpty();
+        assertThat(result("retry")).isEqualTo(1);
+        assertThat(completed()).isFalse();
+    }
+
+    @Test
+    void agedOrphanDeleteBeatsCopyButLosesToLaterRealWrite() {
+        var source = source();
+        var model = accountModel(source);
+        dao.copy(model, timestamp);
+
+        task(dao).run(() -> { });
+        assertThat(dao.account(model)).isEmpty();
+        assertThat(result("orphan")).isEqualTo(1);
+        dao.copy(model, timestamp);
+        assertThat(dao.account(model)).isEmpty();
+        dao.copy(model, timestamp + 2);
+        assertThat(dao.account(model)).isPresent();
+    }
+
+    @Test
+    void youngOrphanAndOwnerAppearingOnRecheckAreRetained() {
+        var source = source();
+        var model = accountModel(source);
+        dao.copy(model, Instant.now().toEpochMilli() * 1000);
+        task(dao).run(() -> { });
+        assertThat(dao.account(model)).isPresent();
+        assertThat(completed()).isFalse();
+
+        template.getCqlOperations().execute("TRUNCATE keys_by_owner_and_account_and_service");
+        dao.copy(model, timestamp);
+        var racing = spy(dao);
+        var checks = new AtomicInteger();
+        doAnswer(call -> {
+            if (checks.incrementAndGet() == 2) {
+                seed(source, false);
+            }
+            return call.callRealMethod();
+        }).when(racing).ownerExists(any(), any());
+        task(racing).run(() -> { });
+        assertThat(checks.get()).isEqualTo(2);
+        assertThat(dao.account(model)).isPresent();
+        assertThat(completed()).isFalse();
+    }
+
+    @Test
+    void markerHasNoTtlAndDeletionIsObservedWithoutCaching() {
+        task(dao).run(() -> { });
+        assertThat(completed()).isTrue();
+        var row = session.execute("SELECT TTL(updated_at) AS ttl FROM row_update_lock "
+                + "WHERE table_name=? AND record_key=?", KeysByAccountIndexMigrationTask.MARKER_TABLE,
+                KeysByAccountIndexMigrationTask.MARKER_RECORD).one();
+        assertThat(row.isNull("ttl")).isTrue();
+        assertThat(markers.markCompleted(KeysByAccountIndexMigrationTask.MARKER_TABLE,
+                KeysByAccountIndexMigrationTask.MARKER_RECORD, Instant.now())).isFalse();
+        session.execute("DELETE FROM row_update_lock WHERE table_name=? AND record_key=?",
+                KeysByAccountIndexMigrationTask.MARKER_TABLE, KeysByAccountIndexMigrationTask.MARKER_RECORD);
+        assertThat(completed()).isFalse();
+        task(dao).run(() -> { });
+        assertThat(completed()).isTrue();
+    }
+
+    @Test
+    void schedulerUsesCassandraLockAndExtendsItBetweenPages() {
+        scheduler.run();
+        assertThat(completed()).isTrue();
+        var executor = new DefaultLockingTaskExecutor(lockProvider);
+        var ran = new AtomicBoolean();
+        executor.executeWithLock((Runnable) () -> {
+            LockAssert.assertLocked();
+            var before = session.execute("SELECT lockuntil FROM lock WHERE name=?", "contention-test")
+                    .one().getInstant("lockuntil");
+            LockExtender.extendActiveLock(Duration.ofMinutes(10), Duration.ZERO);
+            var after = session.execute("SELECT lockuntil FROM lock WHERE name=?", "contention-test")
+                    .one().getInstant("lockuntil");
+            assertThat(after).isAfter(before);
+            var contender = lockProvider.lock(new LockConfiguration(Instant.now(), "contention-test",
+                    Duration.ofMinutes(1), Duration.ZERO));
+            assertThat(contender).isEmpty();
+            ran.set(true);
+        }, new LockConfiguration(Instant.now(), "contention-test", Duration.ofMinutes(1), Duration.ZERO));
+        assertThat(ran).isTrue();
+        var next = lockProvider.lock(new LockConfiguration(Instant.now(), "contention-test",
+                Duration.ofMinutes(1), Duration.ZERO));
+        assertThat(next).isPresent();
+        next.orElseThrow().unlock();
+    }
+
+    private KeysByAccountIndexMigrationTask task(KeysByAccountIndexMigrationDao migrationDao) {
+        var task = new KeysByAccountIndexMigrationTask(migrationDao, markers, properties, services,
+                ownerConverter, accountConverter, registry, telemetry, Clock.systemUTC());
+        task.initializeMetrics();
+        return task;
+    }
+
+    private KeyByOwnerAndServiceVo source() {
+        return KEY_BY_OWNER_AND_SERVICE_VO_1.toBuilder().ncaId(null).ncaIdInDetails(null)
+                .audienceServiceIds(Set.of(KEY_BY_OWNER_AND_SERVICE_VO_1.getIssuerServiceId())).build();
+    }
+
+    private void seed(KeyByOwnerAndServiceVo source, boolean credential) {
+        template.insert(ownerConverter.voToModel(source), insertAt(timestamp));
+        if (credential) {
+            var key = KEY_VO_1.toBuilder().keyHash(source.getKeyHash()).ncaId(source.getNcaId())
+                    .ncaIdInDetails(source.getNcaIdInDetails()).build();
+            template.insert(credentialConverter.voToModel(key), insertAt(timestamp));
+        }
+    }
+
+    private KeyByOwnerAndAccountAndServiceVo target(KeyByOwnerAndServiceVo source) {
+        return new KeyByOwnerAndAccountAndServiceVo(source, properties.getNcaId()).toBuilder()
+                .issuerServiceId(services.toCanonicalId(source.getIssuerServiceId()))
+                .audienceServiceIds(source.getAudienceServiceIds().stream().map(services::toCanonicalId)
+                        .collect(java.util.stream.Collectors.toSet()))
+                .ncaIdInDetails(properties.getNcaId()).build();
+    }
+
+    private KeyByOwnerAndAccountAndServiceModel accountModel(KeyByOwnerAndServiceVo source) {
+        return accountConverter.voToModel(target(source));
+    }
+
+    private KeyByOwnerAndAccountAndServiceVo account(KeyByOwnerAndServiceVo source) {
+        return accountConverter.modelToVo(dao.account(accountModel(source)).orElseThrow().model());
+    }
+
+    private InsertOptions insertAt(long value) {
+        return InsertOptions.builder().timestamp(value).build();
+    }
+
+    private DeleteOptions deleteAt(long value) {
+        return DeleteOptions.builder().timestamp(value).build();
+    }
+
+    private boolean completed() {
+        return markers.isCompleted(KeysByAccountIndexMigrationTask.MARKER_TABLE,
+                KeysByAccountIndexMigrationTask.MARKER_RECORD);
+    }
+
+    private double result(String value) {
+        return registry.get("nvcf_api_keys_keys_by_account_index_copy_keys_total")
+                .tag("result", value).counter().count();
+    }
+}
