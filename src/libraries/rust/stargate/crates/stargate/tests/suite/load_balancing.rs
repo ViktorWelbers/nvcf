@@ -1615,7 +1615,8 @@ async fn wait_and_widen_rejects_alias_when_backend_is_full_on_another_name() {
         let (upstream_addr, inference_server_url, _tunnel) =
             start_dummy_inst_with_models(base, &model_ids).await;
         let runtime = PylonRuntimeState::new(InferenceServerStatus::Active, &model_ids);
-        for (model, num_running_queries) in [(base, base_running), (alias, 0)] {
+        let model_running = [(base, base_running), (alias, 0)];
+        for (model, num_running_queries) in model_running {
             runtime.set_model_stats(
                 model,
                 CurrentModelStats {
@@ -1642,7 +1643,7 @@ async fn wait_and_widen_rejects_alias_when_backend_is_full_on_another_name() {
         let state = stargate.handle.state();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         // One registration update upserts its models one at a time.
-        for (model, min_running) in [(base, base_running), (alias, 0)] {
+        for (model, min_running) in model_running {
             let target = RoutingTargetKey {
                 routing_key: None,
                 model_id: model.to_string(),
