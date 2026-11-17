@@ -23,19 +23,33 @@ import static com.nvidia.apikeys.TestData.KEY_AUTHZ_1;
 import static com.nvidia.apikeys.TestData.KEY_AUTHZ_2;
 import static com.nvidia.apikeys.TestData.SERVICE_VO_1;
 import static com.nvidia.apikeys.TestData.TEST_OM;
+import static com.nvidia.apikeys.TestData.servicesService;
 import static com.nvidia.apikeys.utils.TestUtils.assertThrowsExceptionWithDetails;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import tools.jackson.databind.node.ObjectNode;
+import com.nvidia.apikeys.services.ServicesService;
 import com.nvidia.apikeys.vo.ServiceVo;
 import com.nvidia.boot.exceptions.BadRequestException;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
+import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 @ExtendWith(MockitoExtension.class)
 class ValidatingAuthorizationsConverterTest {
+
+    private static final String LEGACY_ID = "legacy-service-id";
+    private static final String CANONICAL_ID = "canonical-service-id";
+
+    @Spy
+    private ServicesService servicesService = servicesService(
+            SERVICE_VO_1.toBuilder()
+                    .serviceId(CANONICAL_ID)
+                    .legacyServiceIds(Set.of(LEGACY_ID))
+                    .build());
 
     @InjectMocks
     private ValidatingAuthorizationsConverter converter;
@@ -71,4 +85,36 @@ class ValidatingAuthorizationsConverterTest {
                 "authorizations size can not be greater than 10 but was 20");
     }
 
+    @Test
+    void readValidAuthorizations_canonicalizesAudAndPreservesAuds() {
+        var authz = TEST_OM.readTree("""
+                {"policies": [{"aud": "legacy-service-id", "auds": ["legacy-service-id"], "product": "p"}]}
+                """);
+
+        assertThat(converter.readValidAuthorizations(SERVICE_VO_1, authz))
+                .isEqualTo("{\"policies\":[{\"aud\":\"canonical-service-id\","
+                                   + "\"auds\":[\"legacy-service-id\"],\"product\":\"p\"}]}");
+    }
+
+    @Test
+    void readValidAuthorizations_preservesCanonicalAudienceAndOtherPolicyFields() {
+        var authz = TEST_OM.readTree("""
+                {"policies": [{"aud": "canonical-service-id", "auds": ["other-service", 7]}]}
+                """);
+
+        assertThat(converter.readValidAuthorizations(SERVICE_VO_1, authz))
+                .isEqualTo("{\"policies\":[{\"aud\":\"canonical-service-id\","
+                                   + "\"auds\":[\"other-service\",7]}]}");
+    }
+
+    @Test
+    void readValidAuthorizations_doesNotChangeTheCallersNode() {
+        var authz = TEST_OM.readTree("""
+                {"policies": [{"aud": "legacy-service-id"}]}
+                """);
+
+        converter.readValidAuthorizations(SERVICE_VO_1, authz);
+
+        assertThat(authz.toString()).isEqualTo("{\"policies\":[{\"aud\":\"legacy-service-id\"}]}");
+    }
 }

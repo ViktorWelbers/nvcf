@@ -21,10 +21,14 @@ import com.datastax.oss.driver.api.core.CqlSession;
 import com.datastax.oss.driver.api.core.cql.ResultSet;
 import com.nvidia.apikeys.converters.KeyOwnerVoBuilder;
 import com.nvidia.apikeys.config.exceptions.CassandraException;
+import com.nvidia.apikeys.persistance.models.KeyByOwnerAndAccountAndServiceModel;
 import com.nvidia.apikeys.persistance.models.KeyByOwnerAndServiceModel;
 import com.nvidia.apikeys.persistance.models.KeyModel;
 import com.nvidia.apikeys.persistance.repositories.KeyByOwnerAndServiceRepository;
 import com.nvidia.apikeys.persistance.repositories.KeyRepository;
+import com.nvidia.apikeys.services.KeyNcaIdResolver;
+import com.nvidia.apikeys.services.ServicesService;
+import com.nvidia.apikeys.vo.KeyByOwnerAndAccountAndServiceVo;
 import com.nvidia.apikeys.vo.KeyByOwnerAndServiceVo;
 import com.nvidia.apikeys.vo.KeyOwnerType;
 import com.nvidia.apikeys.vo.KeyOwnerVo;
@@ -32,11 +36,15 @@ import com.nvidia.apikeys.vo.KeyVo;
 import com.nvidia.apikeys.vo.SavedKeyVo;
 import com.nvidia.boot.exceptions.ServiceUnavailableException;
 import com.nvidia.boot.exceptions.UnprocessableEntityException;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import jakarta.annotation.PostConstruct;
 import java.time.Clock;
 import java.util.Collection;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.stream.Collectors;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DataAccessResourceFailureException;
@@ -56,11 +64,31 @@ public class KeysDao {
     private final KeyByOwnerAndServiceRepository keyByOwnerAndServiceRepository;
     private final KeyModelConverter keyConverter;
     private final KeyByOwnerAndServiceModelConverter keyByOwnerAndServiceConverter;
+    private final KeyByOwnerAndAccountAndServiceModelConverter keyByAccountConverter;
+    private final KeyNcaIdResolver ncaIdResolver;
+    private final ServicesService servicesService;
+    private final MeterRegistry meterRegistry;
     private final KeyOwnerVoBuilder keyOwnerVoBuilder;
     private final Clock clock;
     private final CassandraTemplate cassandraTemplate;
     private final CqlSession session;
 
+    private static final String DUAL_WRITE_METRIC = "nvcf_api_keys_dual_write_total";
+    private static final String RESULT_BATCH = "batch";
+    private static final String RESULT_DIRECT = "direct";
+    private static final String RESULT_FAILED = "failed";
+    private static final List<String> WRITTEN_TABLES = List.of(
+            KeyModel.TABLE_NAME,
+            KeyByOwnerAndServiceModel.TABLE_NAME,
+            KeyByOwnerAndAccountAndServiceModel.TABLE_NAME);
+    private static final List<String> WRITE_RESULTS = List.of(
+            RESULT_BATCH, RESULT_DIRECT, RESULT_FAILED);
+
+    @PostConstruct
+    void initializeMetrics() {
+        WRITTEN_TABLES.forEach(table -> WRITE_RESULTS.forEach(
+                result -> dualWriteCounter(table, result)));
+    }
 
     /**
      * Writes a new key without reading it back. A failed read after a successful write would
@@ -91,33 +119,57 @@ public class KeysDao {
         // write key record
         KeyModel keyModel = keyConverter.voToModel(key);
 
-        // populate reverse lookup
+        // populate reverse lookups
         KeyByOwnerAndServiceVo keyByOwnerAndServiceVo = new KeyByOwnerAndServiceVo(key, owner);
         var keyByOwnerAndServiceModel = keyByOwnerAndServiceConverter.voToModel(
                 keyByOwnerAndServiceVo);
+        var keyByAccountModel = toAccountModel(keyByOwnerAndServiceVo);
 
         long timestamp = writeTimestamp();
         CassandraBatchOperations batchOperations = cassandraTemplate.batchOps()
                 .withTimestamp(timestamp)
                 .insert(List.of(keyModel))
-                .insert(List.of(keyByOwnerAndServiceModel));
+                .insert(List.of(keyByOwnerAndServiceModel))
+                .insert(List.of(keyByAccountModel));
 
         try {
             if (!batchOperations.execute().wasApplied()) {
                 throw new CassandraException("Failed to write key into db");
             }
+            recordWrites(WRITTEN_TABLES, RESULT_BATCH);
         } catch (TransientDataAccessException | DataAccessResourceFailureException e) {
-            log.warn("logged batch write of key failed, writing rows directly", e);
+            log.atWarn().addKeyValue("keyId", key.getKeyId())
+                    .addKeyValue("ncaId", keyByAccountModel.getNcaId())
+                    .setCause(e).log("Logged batch write failed, writing rows directly");
             InsertOptions options = InsertOptions.builder()
                     .timestamp(timestamp)
                     .idempotent(true)
                     .build();
             // list the key before making it valid, so a partial write never leaves a hidden key
-            writeDirectly(() -> {
-                cassandraTemplate.insert(keyByOwnerAndServiceModel, options);
-                cassandraTemplate.insert(keyModel, options);
-            });
+            writeDirectly(
+                    () -> cassandraTemplate.insert(keyByOwnerAndServiceModel, options),
+                    KeyByOwnerAndServiceModel.TABLE_NAME);
+            writeDirectly(
+                    () -> cassandraTemplate.insert(keyByAccountModel, options),
+                    KeyByOwnerAndAccountAndServiceModel.TABLE_NAME);
+            writeDirectly(
+                    () -> cassandraTemplate.insert(keyModel, options),
+                    KeyModel.TABLE_NAME);
+        } catch (RuntimeException e) {
+            recordWrites(WRITTEN_TABLES, RESULT_FAILED);
+            throw e;
         }
+    }
+
+    private KeyByOwnerAndAccountAndServiceModel toAccountModel(KeyByOwnerAndServiceVo key) {
+        var ncaId = ncaIdResolver.resolve(key.getNcaId(), key.getNcaIdInDetails());
+        var accountKey = new KeyByOwnerAndAccountAndServiceVo(key, ncaId).toBuilder()
+                .issuerServiceId(servicesService.toCanonicalId(key.getIssuerServiceId()))
+                .audienceServiceIds(key.getAudienceServiceIds().stream()
+                        .map(servicesService::toCanonicalId)
+                        .collect(Collectors.toSet()))
+                .build();
+        return keyByAccountConverter.voToModel(accountKey);
     }
 
     public Optional<KeyVo> getKeyByHash(String hash) {
@@ -162,45 +214,66 @@ public class KeysDao {
                 .build();
 
         var keyByOwnerAndServiceModel = keyByOwnerAndServiceConverter.voToModel(key);
+        var keyByAccountModel = toAccountModel(key);
 
         long timestamp = writeTimestamp();
         CassandraBatchOperations batchOperations = cassandraTemplate.batchOps()
                 .withTimestamp(timestamp)
                 .delete(List.of(keyModel))
-                .delete(List.of(keyByOwnerAndServiceModel));
+                .delete(List.of(keyByOwnerAndServiceModel))
+                .delete(List.of(keyByAccountModel));
 
         try {
             if (!batchOperations.execute().wasApplied()) {
                 throw new CassandraException("Failed to delete key.");
             }
+            recordWrites(WRITTEN_TABLES, RESULT_BATCH);
         } catch (TransientDataAccessException | DataAccessResourceFailureException e) {
-            log.warn("logged batch delete of key failed, deleting rows directly", e);
+            log.atWarn().addKeyValue("keyId", key.getKeyId())
+                    .addKeyValue("ncaId", keyByAccountModel.getNcaId())
+                    .setCause(e).log("Logged batch delete failed, deleting rows directly");
             DeleteOptions options = DeleteOptions.builder()
                     .timestamp(timestamp)
                     .idempotent(true)
                     .build();
-            // revoke the key before removing it from the owner's list
-            writeDirectly(() -> {
-                cassandraTemplate.delete(keyModel, options);
-                cassandraTemplate.delete(keyByOwnerAndServiceModel, options);
-            });
+            // revoke the key before removing it from the owner's lists
+            writeDirectly(
+                    () -> cassandraTemplate.delete(keyModel, options),
+                    KeyModel.TABLE_NAME);
+            writeDirectly(
+                    () -> cassandraTemplate.delete(keyByOwnerAndServiceModel, options),
+                    KeyByOwnerAndServiceModel.TABLE_NAME);
+            writeDirectly(
+                    () -> cassandraTemplate.delete(keyByAccountModel, options),
+                    KeyByOwnerAndAccountAndServiceModel.TABLE_NAME);
+        } catch (RuntimeException e) {
+            recordWrites(WRITTEN_TABLES, RESULT_FAILED);
+            throw e;
         }
     }
 
-    /**
-     * Writes the rows of a logged batch one by one after the batch failed. The batch outcome is
-     * unknown: a timed-out batch may still be replayed from the batchlog. The rows use the batch
-     * timestamp, so writing them again leaves the same state as the batch. A failure here does not
-     * advertise Retry-After: a client that retries a create generates a different key, while the
-     * first one may already be stored.
-     */
-    private void writeDirectly(Runnable write) {
+    // Reuse the batch timestamp because a timed-out batch may still replay.
+    // Do not advertise a retry: another create generates a different key.
+    private void writeDirectly(Runnable write, String table) {
         try {
             write.run();
+            recordWrites(List.of(table), RESULT_DIRECT);
         } catch (TransientDataAccessException | DataAccessResourceFailureException e) {
+            recordWrites(List.of(table), RESULT_FAILED);
             throw ServiceUnavailableException.withoutRetryAfter(
                     "Key storage is temporarily unavailable, the outcome of the write is unknown", e);
+        } catch (RuntimeException e) {
+            recordWrites(List.of(table), RESULT_FAILED);
+            throw e;
         }
+    }
+
+    private void recordWrites(List<String> tables, String result) {
+        tables.forEach(table -> dualWriteCounter(table, result).increment());
+    }
+
+    private Counter dualWriteCounter(String table, String result) {
+        return meterRegistry.counter(DUAL_WRITE_METRIC, "table", table, "result", result);
     }
 
     private long writeTimestamp() {

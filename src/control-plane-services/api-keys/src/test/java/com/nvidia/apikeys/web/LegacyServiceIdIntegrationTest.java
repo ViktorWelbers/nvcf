@@ -31,8 +31,13 @@ import static org.springframework.http.HttpStatus.OK;
 import com.nvidia.apikeys.App;
 import com.nvidia.apikeys.config.IntegrationTestConfiguration;
 import com.nvidia.apikeys.persistance.dao.KeysDao;
+import com.nvidia.apikeys.persistance.models.KeyByOwnerAndAccountAndServiceModel;
+import com.nvidia.apikeys.persistance.repositories.KeyByOwnerAndAccountAndServiceRepository;
 import com.nvidia.apikeys.utils.TestClock;
+import com.nvidia.apikeys.vo.KeyByOwnerAndAccountAndServiceVo;
+import com.nvidia.apikeys.vo.KeyOwnerType;
 import com.nvidia.apikeys.vo.KeyVo;
+import com.nvidia.boot.jwt.services.mapping.EncryptedModelConverter;
 import java.time.ZoneId;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -74,6 +79,13 @@ class LegacyServiceIdIntegrationTest extends BaseIntegrationTest {
 
     @Autowired
     private KeysDao keysDao;
+
+    @Autowired
+    private KeyByOwnerAndAccountAndServiceRepository accountRepository;
+
+    @Autowired
+    private EncryptedModelConverter<KeyByOwnerAndAccountAndServiceModel,
+            KeyByOwnerAndAccountAndServiceVo> accountConverter;
 
     @BeforeEach
     void storeKeyUnderLegacyIds() {
@@ -163,6 +175,58 @@ class LegacyServiceIdIntegrationTest extends BaseIntegrationTest {
             assertThat(response.getStatusCode()).isEqualTo(OK);
             assertThat(response.getBody()).contains(CANONICAL_ID);
         }
+    }
+
+    @Test
+    void createWithLegacyIdsStoresCanonicalIdsAndNcaIdInAllThreeTables() {
+        var body = """
+                {"description":"canonical-key","expires_at":"%s",
+                 "audience_service_ids":["%s"],
+                 "authorizations":{"policies":[{"aud":"%s","auds":["%s"]}]}}
+                """.formatted(KEY_VO_1.getExpiresAt(), SERVICE_ID_1, SERVICE_ID_1, SERVICE_ID_1);
+
+        var response = exchange("/v1/keys", HttpMethod.POST, SERVICE_ID_1, body);
+
+        assertThat(response.getStatusCode()).isEqualTo(OK);
+        var id = jsonMapper.readTree(response.getBody()).get("id").asString();
+        var ownerKey = keysDao.getKeyByOwnerAndServiceAndId(
+                KeyOwnerType.USER, USER_KEY_OWNER_ID_1, CANONICAL_ID, id).orElseThrow();
+        var key = keysDao.getKeyByHash(ownerKey.getKeyHash()).orElseThrow();
+        assertThat(key.getIssuerServiceId()).isEqualTo(CANONICAL_ID);
+        assertThat(key.getAudienceServiceIds()).containsExactly(CANONICAL_ID);
+        assertThat(key.getNcaId()).isEqualTo(nakProperties.getNcaId());
+        assertThat(ownerKey.getNcaId()).isEqualTo(nakProperties.getNcaId());
+        var policy = jsonMapper.readTree(key.getAuthorizations()).get("policies").get(0);
+        assertThat(policy.get("aud").asString()).isEqualTo(CANONICAL_ID);
+        assertThat(policy.get("auds").get(0).asString()).isEqualTo(SERVICE_ID_1);
+        var accountKey = accountRepository.findByNcaIdAndOwnerTypeAndOwnerId(
+                        nakProperties.getNcaId(), KeyOwnerType.USER, USER_KEY_OWNER_ID_1).stream()
+                .filter(row -> row.getKeyId().equals(id))
+                .map(accountConverter::modelToVo).findFirst().orElseThrow();
+        assertThat(accountKey.getIssuerServiceId()).isEqualTo(CANONICAL_ID);
+        assertThat(accountKey.getAudienceServiceIds()).containsExactly(CANONICAL_ID);
+        assertThat(accountKey.getKeyHash()).isEqualTo(key.getKeyHash());
+    }
+
+    @Test
+    void updateKeepsStoredLegacyIdsAndUsesCanonicalIdsInTheAccountIndex() {
+        var body = """
+                {"authorizations":{"policies":[{"aud":"%s","auds":["%s"]}]}}
+                """.formatted(SERVICE_ID_1, SERVICE_ID_1);
+
+        var response = exchange("/v1/keys/" + KEY_ID_1 + "/authorizations",
+                HttpMethod.PUT, CANONICAL_ID, body);
+
+        assertThat(response.getStatusCode()).isEqualTo(OK);
+        var key = keysDao.getKeyByHash(KEY_VO_1.getKeyHash()).orElseThrow();
+        assertThat(key.getIssuerServiceId()).isEqualTo(SERVICE_ID_1);
+        assertThat(key.getAudienceServiceIds()).containsExactly(SERVICE_ID_1);
+        var rows = accountRepository.findByNcaIdAndOwnerTypeAndOwnerId(
+                nakProperties.getNcaId(), KeyOwnerType.USER, USER_KEY_OWNER_ID_1);
+        assertThat(rows).hasSize(1);
+        var accountKey = accountConverter.modelToVo(rows.getFirst());
+        assertThat(accountKey.getIssuerServiceId()).isEqualTo(CANONICAL_ID);
+        assertThat(accountKey.getAudienceServiceIds()).containsExactly(CANONICAL_ID);
     }
 
     private ResponseEntity<String> exchange(

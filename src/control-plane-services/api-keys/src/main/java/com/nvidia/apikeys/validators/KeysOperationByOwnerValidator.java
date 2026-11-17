@@ -88,6 +88,7 @@ public class KeysOperationByOwnerValidator {
                 service, createKeyRequest.getAuthorizations());
 
         KeyVo keyVo = KeyVo.builder()
+                .ncaId(nakProperties.getNcaId())
                 .keyId(generatedKeyVo.getKeyId())
                 .keyHash(generatedKeyVo.getKeyHash())
                 .audienceServiceIds(audienceServiceIds)
