@@ -69,7 +69,6 @@ Backend-summed fields:
 - `queue_size`
 - `queued_input_size`
 - `num_running_queries`
-- `total_query_input_size`
 - `input_processing_queries`
 - `output_generation_queries`
 - `stats_capabilities`
@@ -80,11 +79,8 @@ Cluster latest-wins fields:
 - `max_output_tps`
 - KV capacity/used/free tokens
 - `max_engine_concurrency`
-
-`queue_time_estimate_ms_by_priority` is the input-rate-weighted mean of the
-backend estimates for each priority, bounded by the lowest and highest backend
-estimate. A backend with queued work but no valid input rate or estimate
-clears the cluster map.
+- `total_query_input_size`
+- `queue_time_estimate_ms_by_priority`
 
 - `last_mean_input_tps` is the sum of active backend reports.
 - `max_input_tps` is the greatest active backend generation maximum, available
