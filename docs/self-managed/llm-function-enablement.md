@@ -65,10 +65,13 @@ container's own shutdown output after the pause may not be sent.
 A new worker registers with `llm-request-router` at a fixed 100 input tokens
 per second. To start it at a measured rate instead, set
 `PYLON_DO_CALIBRATION: "true"` in `agent.functionEnvOverrides` of the
-`nvca-operator` chart values. A `pylon` version that reads this variable then
+`nvca-operator` chart values. The value must be `true` or `false`; any other
+value stops `pylon` at startup. A `pylon` version that reads this variable then
 measures each model's input rate before it registers. A model whose
 calibration fails starts at 100 and logs a warning. Calibration adds about 5 to
-15 seconds per model name to worker startup. To change the time limit for each
+15 seconds per model name to worker startup. The worker pod can be Ready during
+that time. If the function has no other registered worker, a request then gets
+`404` with `no_eligible_candidates`. To change the time limit for each
 calibration load step, 5 seconds by default, set
 `PYLON_BRINGUP_CALIBRATION_TIMEOUT_MS` there. Both apply to worker pods created
 after NVCA picks up the new values.
