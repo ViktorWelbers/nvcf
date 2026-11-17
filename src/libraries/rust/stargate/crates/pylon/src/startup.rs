@@ -533,10 +533,14 @@ async fn start_pylon_runtime(args: &Args, plan: &PylonStartupPlan) -> Result<Run
         server_identity_reloader,
     )
     .await?;
-    if matches!(
-        &plan.model_initialization,
-        ModelInitialization::Calibration(_)
-    ) {
+    // Without --cluster-id the cluster is this Pylon's own inference server ID,
+    // so it is the cluster's only Pylon.
+    if args.cluster_id.is_some()
+        && matches!(
+            &plan.model_initialization,
+            ModelInitialization::Calibration(_)
+        )
+    {
         warn!(
             cluster_id = %plan.cluster_id,
             "running local calibration; --do-calibration is valid only for a cluster with one pylon"
