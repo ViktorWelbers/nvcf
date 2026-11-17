@@ -556,11 +556,24 @@ func withAgentConfigMapper() clusterMapper {
 			workerDegradationPeriod = time.Duration(minutes) * time.Minute
 		}
 
+		var containerRestartCountToFailInstance int32
+		if countStr := src.ClusterConfigurations[NVCAContainerRestartCountToFailInstanceConfig]; countStr != "" {
+			count, err := strconv.ParseInt(countStr, 10, 32)
+			if err != nil {
+				return fmt.Errorf("failed to parse container restart count to fail instance: %w", err)
+			}
+			if count < 0 {
+				return fmt.Errorf("container restart count to fail instance must not be negative, got %d", count)
+			}
+			containerRestartCountToFailInstance = int32(count)
+		}
+
 		// Map NVCFWorkerConfig
 		dest.NVCFBackend.Spec.AgentConfig.NVCFWorkerConfig = nvidiaiov1.NVCFWorkerConfig{
-			CacheMountOptionsEnabled: cacheMountOptionsEnabled,
-			CacheMountOptions:        cacheMountOptions,
-			WorkerDegradationPeriod:  workerDegradationPeriod,
+			CacheMountOptionsEnabled:            cacheMountOptionsEnabled,
+			CacheMountOptions:                   cacheMountOptions,
+			WorkerDegradationPeriod:             workerDegradationPeriod,
+			ContainerRestartCountToFailInstance: containerRestartCountToFailInstance,
 		}
 
 		return nil

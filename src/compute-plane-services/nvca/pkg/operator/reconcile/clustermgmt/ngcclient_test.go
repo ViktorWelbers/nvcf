@@ -915,6 +915,38 @@ func TestWithAgentConfigMapper(t *testing.T) {
 		assert.Contains(t, err.Error(), "failed to parse worker degradation period minutes")
 	})
 
+	t.Run("maps container restart count to fail instance", func(t *testing.T) {
+		src := &clusterDTO{
+			ClusterConfigurations: CaseInsensitiveClusterConfigMap{
+				NVCAContainerRestartCountToFailInstanceConfig: "5",
+			},
+		}
+		dest := &Cluster{NVCFBackend: &nvidiaiov1.NVCFBackend{}}
+
+		err := withAgentConfigMapper()(ctx, nvidiaiov1.EnvTypeProd, src, dest)
+		require.NoError(t, err)
+		assert.Equal(t, int32(5), dest.NVCFBackend.Spec.AgentConfig.NVCFWorkerConfig.ContainerRestartCountToFailInstance)
+	})
+
+	t.Run("returns error for invalid container restart count to fail instance", func(t *testing.T) {
+		for value, wantErr := range map[string]string{
+			"five":        "failed to parse container restart count to fail instance",
+			"-1":          "must not be negative",
+			"99999999999": "failed to parse container restart count to fail instance",
+		} {
+			src := &clusterDTO{
+				ClusterConfigurations: CaseInsensitiveClusterConfigMap{
+					NVCAContainerRestartCountToFailInstanceConfig: value,
+				},
+			}
+			dest := &Cluster{NVCFBackend: &nvidiaiov1.NVCFBackend{}}
+
+			err := withAgentConfigMapper()(ctx, nvidiaiov1.EnvTypeProd, src, dest)
+			require.Error(t, err, value)
+			assert.Contains(t, err.Error(), wantErr, value)
+		}
+	})
+
 	t.Run("handles nil cluster configurations", func(t *testing.T) {
 		src := &clusterDTO{
 			ClusterConfigurations: nil,

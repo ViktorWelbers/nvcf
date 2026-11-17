@@ -273,13 +273,13 @@ type ContainerStuckInitializing struct {
 	Message string
 }
 
-// IsContainerInRestartLoop reports whether a container has restarted at least RestartCountToFailInstance times
-// in a Pod launched more than PodLaunchThresholdSecondsOnFailedRestarts ago. RestartCount is never reset during
+// IsContainerInRestartLoop reports whether a container has restarted at least ContainerRestartCountToFailInstance
+// times in a Pod launched more than PodLaunchThresholdSecondsOnFailedRestarts ago. RestartCount is never reset during
 // the Pod's lifetime, so a container whose latest run exited with code 0 after the Pod became Ready is not
 // counted: the app ended on purpose (for example a streaming app that quits when its session ends) and the
 // kubelet restarted it in place.
 func IsContainerInRestartLoop(pod *corev1.Pod, cs corev1.ContainerStatus, k8sTimeConfig *TimeConfig) bool {
-	if cs.RestartCount < RestartCountToFailInstance ||
+	if cs.RestartCount < k8sTimeConfig.restartCountToFailInstance() ||
 		!IsTimeSincePodLaunchedLaterThan(pod, k8sTimeConfig.PodLaunchThresholdSecondsOnFailedRestarts) {
 		return false
 	}

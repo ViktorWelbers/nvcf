@@ -745,6 +745,12 @@
                     "description": "Duration for determining if a worker is degraded (e.g., \"90m\", \"1h30m\")",
                     "default": ""
                 },
+                "containerRestartCountToFailInstance": {
+                    "type": "integer",
+                    "description": "Container restart count at which NVCA marks a function instance failed and replaces it. 0 uses the NVCA default of 3",
+                    "default": 0,
+                    "minimum": 0
+                },
                 "secretMirrorNamespace": {
                     "type": "string",
                     "description": "Default namespace to mirror custom secrets for nvcf workloads",

@@ -1392,6 +1392,53 @@ func TestIsContainerInRestartLoop(t *testing.T) {
 	}
 }
 
+func TestIsContainerInRestartLoopConfiguredThreshold(t *testing.T) {
+	now := time.Now()
+	pod := &corev1.Pod{Status: corev1.PodStatus{
+		StartTime: &metav1.Time{Time: now.Add(-72 * time.Hour)},
+	}}
+	crashed := func(restarts int32) corev1.ContainerStatus {
+		return corev1.ContainerStatus{
+			RestartCount: restarts,
+			State:        corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.NewTime(now)}},
+			LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+				ExitCode:   2,
+				Reason:     "Error",
+				StartedAt:  metav1.NewTime(now.Add(-time.Minute)),
+				FinishedAt: metav1.NewTime(now.Add(-10 * time.Second)),
+			}},
+		}
+	}
+
+	tests := []struct {
+		name      string
+		threshold int32
+		restarts  int32
+		want      bool
+	}{
+		{name: "default threshold fails at three restarts", threshold: 0, restarts: 3, want: true},
+		{name: "default threshold tolerates two restarts", threshold: 0, restarts: 2, want: false},
+		{name: "negative threshold uses the default", threshold: -1, restarts: 3, want: true},
+		{name: "raised threshold tolerates four restarts", threshold: 5, restarts: 4, want: false},
+		{name: "raised threshold fails at its limit", threshold: 5, restarts: 5, want: true},
+		{name: "lowered threshold fails at one restart", threshold: 1, restarts: 1, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			timeConfig := (&TimeConfig{ContainerRestartCountToFailInstance: tt.threshold}).Complete()
+			assert.Equal(t, tt.want, IsContainerInRestartLoop(pod, crashed(tt.restarts), timeConfig))
+		})
+	}
+
+	t.Run("uncompleted config uses the default", func(t *testing.T) {
+		timeConfig := &TimeConfig{PodLaunchThresholdSecondsOnFailedRestarts: time.Minute}
+		assert.False(t, IsContainerInRestartLoop(pod, crashed(0), timeConfig))
+		assert.False(t, IsContainerInRestartLoop(pod, crashed(RestartCountToFailInstance-1), timeConfig))
+		assert.True(t, IsContainerInRestartLoop(pod, crashed(RestartCountToFailInstance), timeConfig))
+	})
+}
+
 func TestHasContainerNamed(t *testing.T) {
 	tests := []struct {
 		name       string
