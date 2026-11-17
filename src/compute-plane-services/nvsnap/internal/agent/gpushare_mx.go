@@ -109,9 +109,33 @@ func sessionPIDs(procBase string, sessionHostPID int) []int {
 }
 
 // gpushareMX runs mx-pause or mx-resume on pids (namespace pids) through
-// the tool in the container whose init is hostPID. A variable for tests.
-var gpushareMX = func(ctx context.Context, hostPID int, verb string, pids []int) (string, error) {
-	return gpushareTool(ctx, hostPID, gpushareMXTimeout, append([]string{verb}, intsToStrings(pids)...)...)
+// the tool in the container whose init is hostPID; mx-resume with host
+// passes it as the address ModelExpress advertises. A variable for tests.
+var gpushareMX = func(ctx context.Context, hostPID int, verb, host string, pids []int) (string, error) {
+	args := []string{verb}
+	if host != "" {
+		args = []string{"--host", host, verb}
+	}
+	return gpushareTool(ctx, hostPID, gpushareMXTimeout, append(args, intsToStrings(pids)...)...)
+}
+
+// gpushareMXHostSupported reports whether the GPU tool (its text) takes
+// --host for mx-resume. A tool from before it answers "unknown command".
+func gpushareMXHostSupported(toolText string) bool {
+	return strings.Contains(toolText, "--host") && gpushareMXSupported(toolText)
+}
+
+// restoredMXHost is the address a restored ModelExpress worker advertises:
+// its pod's own IP, podIP, when the restore moved it off the captured
+// address and the tool can pass it. A restored pod keeps its captured
+// address as a local one (RESTORE-POD-ADDRESS.md), so the process, left to
+// itself, republishes that one, which a peer outside the instance cannot
+// reach. "" leaves ModelExpress as it was.
+func restoredMXHost(podIP, capturedIP, toolText string) string {
+	if podIP == "" || podIP == capturedIP || !gpushareMXHostSupported(toolText) {
+		return ""
+	}
+	return podIP
 }
 
 // pauseModelExpress has ModelExpress in pids release its RDMA state
@@ -131,10 +155,10 @@ func pauseModelExpress(ctx context.Context, modelExpress bool, toolText string, 
 		return false, nil
 	}
 	t0 := time.Now()
-	out, err := gpushareMX(ctx, hostPID, "mx-pause", pids)
+	out, err := gpushareMX(ctx, hostPID, "mx-pause", "", pids)
 	if err != nil {
 		// Some processes may have paused before one refused: put them back.
-		resumeModelExpress(ctx, hostPID, pids, log)
+		resumeModelExpress(ctx, hostPID, "", pids, log)
 		return false, fmt.Errorf("%w: %w", errMXPauseRefused, err)
 	}
 	log.WithFields(logrus.Fields{"pids": pids, "duration": time.Since(t0).Round(time.Millisecond).String()}).
@@ -146,10 +170,10 @@ func pauseModelExpress(ctx context.Context, modelExpress bool, toolText string, 
 // and publish them. It runs to its end under its own deadline. A failure
 // is logged, not returned: the worker serves either way, only no longer
 // shares its weights with peers.
-func resumeModelExpress(ctx context.Context, hostPID int, pids []int, log *logrus.Entry) {
+func resumeModelExpress(ctx context.Context, hostPID int, host string, pids []int, log *logrus.Entry) {
 	t0 := time.Now()
-	out, err := gpushareMX(context.WithoutCancel(ctx), hostPID, "mx-resume", pids)
-	l := log.WithFields(logrus.Fields{"pids": pids, "duration": time.Since(t0).Round(time.Millisecond).String()})
+	out, err := gpushareMX(context.WithoutCancel(ctx), hostPID, "mx-resume", host, pids)
+	l := log.WithFields(logrus.Fields{"pids": pids, "host": host, "duration": time.Since(t0).Round(time.Millisecond).String()})
 	if err != nil {
 		l.WithError(err).Warn("gpushare: ModelExpress did not resume; the worker serves, but no longer shares its weights with peers")
 		return
@@ -168,7 +192,7 @@ func sourceRunsOn(dumped, leaveRunning bool) bool {
 // launches run: after open, or after a resume without the held gate. A
 // node bundle whose tool has no mx-resume leaves it paused, said in the
 // log: the worker serves, but does not share its weights with peers.
-func resumeRestoredModelExpress(ctx context.Context, gs *GPUShareInfo, toolText string, toolPID int, log *logrus.Entry) {
+func resumeRestoredModelExpress(ctx context.Context, gs *GPUShareInfo, toolText string, toolPID int, host string, log *logrus.Entry) {
 	if gs == nil || !gs.ModelExpress {
 		return
 	}
@@ -176,7 +200,10 @@ func resumeRestoredModelExpress(ctx context.Context, gs *GPUShareInfo, toolText 
 		log.Warn("gpushare: the capture paused ModelExpress, but this node's GPU tool has no mx-resume; the worker serves, but does not share its weights with peers")
 		return
 	}
-	resumeModelExpress(ctx, toolPID, gs.PIDs, log)
+	if host == "" {
+		log.Info("gpushare: ModelExpress resumes with the address it had; peers outside the instance may not reach it if the pod moved")
+	}
+	resumeModelExpress(ctx, toolPID, host, gs.PIDs, log)
 }
 
 // mxPausable are the processes of the container whose init is
@@ -221,9 +248,18 @@ func releasedByMXPause(fs []PreflightFinding, pausable map[int]bool) []Preflight
 // goResumeRestoredModelExpress runs resumeRestoredModelExpress off the
 // restore's path: the worker serves without it, and a scale-up does not
 // wait for its weights to be published again.
-func goResumeRestoredModelExpress(ctx context.Context, gs *GPUShareInfo, toolText string, toolPID int, log *logrus.Entry) {
+func goResumeRestoredModelExpress(ctx context.Context, gs *GPUShareInfo, toolText string, toolPID int, host string, log *logrus.Entry) {
 	if gs == nil || !gs.ModelExpress {
 		return
 	}
-	go resumeRestoredModelExpress(context.WithoutCancel(ctx), gs, toolText, toolPID, log)
+	go resumeRestoredModelExpress(context.WithoutCancel(ctx), gs, toolText, toolPID, host, log)
+}
+
+// restoredMXHostFor is restoredMXHost for the placeholder of group, read
+// only when the capture paused ModelExpress.
+func (a *Agent) restoredMXHostFor(ctx context.Context, gs *GPUShareInfo, capturedIP string, group restoreV2Group, toolText string) string {
+	if gs == nil || !gs.ModelExpress {
+		return ""
+	}
+	return restoredMXHost(a.placeholderPodIP(ctx, group.Namespace, group.Pod, "", ""), capturedIP, toolText)
 }

@@ -24,8 +24,12 @@ func fakeMX(t *testing.T, fail map[string]bool) *[]string {
 	t.Helper()
 	var calls []string
 	prev := gpushareMX
-	gpushareMX = func(_ context.Context, hostPID int, verb string, pids []int) (string, error) {
-		calls = append(calls, fmt.Sprintf("%s@%d %v", verb, hostPID, pids))
+	gpushareMX = func(_ context.Context, hostPID int, verb, host string, pids []int) (string, error) {
+		c := fmt.Sprintf("%s@%d %v", verb, hostPID, pids)
+		if host != "" {
+			c = "--host " + host + " " + c
+		}
+		calls = append(calls, c)
 		if fail[verb] {
 			// As gpushareTool fails: a toolError carrying the output.
 			out := "pid=7 mx pause: err 2 RDMA device file(s) still open or mapped\n"
@@ -185,18 +189,20 @@ func TestResumeRestoredModelExpress(t *testing.T) {
 		name string
 		gs   *GPUShareInfo
 		text string
+		host string
 		fail bool
 		want []string
 	}{
-		{"no gpushare", nil, mxToolText, false, nil},
-		{"capture did not pause", &GPUShareInfo{PIDs: []int{7}}, mxToolText, false, nil},
-		{"paused", &GPUShareInfo{PIDs: []int{7, 8}, ModelExpress: true}, mxToolText, false, []string{"mx-resume@99 [7 8]"}},
-		{"paused, resume fails", &GPUShareInfo{PIDs: []int{7}, ModelExpress: true}, mxToolText, true, []string{"mx-resume@99 [7]"}},
-		{"paused, tool without mx", &GPUShareInfo{PIDs: []int{7}, ModelExpress: true}, "  open ...", false, nil},
+		{"no gpushare", nil, mxToolText, "", false, nil},
+		{"capture did not pause", &GPUShareInfo{PIDs: []int{7}}, mxToolText, "", false, nil},
+		{"paused", &GPUShareInfo{PIDs: []int{7, 8}, ModelExpress: true}, mxToolText, "", false, []string{"mx-resume@99 [7 8]"}},
+		{"paused, new pod address", &GPUShareInfo{PIDs: []int{7}, ModelExpress: true}, mxToolText, "10.1.2.3", false, []string{"--host 10.1.2.3 mx-resume@99 [7]"}},
+		{"paused, resume fails", &GPUShareInfo{PIDs: []int{7}, ModelExpress: true}, mxToolText, "", true, []string{"mx-resume@99 [7]"}},
+		{"paused, tool without mx", &GPUShareInfo{PIDs: []int{7}, ModelExpress: true}, "  open ...", "", false, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := fakeMX(t, map[string]bool{"mx-resume": tc.fail})
-			resumeRestoredModelExpress(context.Background(), tc.gs, tc.text, 99, testLog())
+			resumeRestoredModelExpress(context.Background(), tc.gs, tc.text, 99, tc.host, testLog())
 			if !slices.Equal(*calls, tc.want) {
 				t.Errorf("calls = %v, want %v", *calls, tc.want)
 			}
@@ -274,6 +280,24 @@ func TestGPUShareInfo_ModelExpressRoundTrip(t *testing.T) {
 		}
 		if b.ModelExpress != gs.ModelExpress {
 			t.Errorf("ModelExpress %v came back %v", gs.ModelExpress, b.ModelExpress)
+		}
+	}
+}
+
+// A restored worker advertises its pod's own address only when the pod
+// moved off the captured one and the tool can pass it (--host).
+func TestRestoredMXHost(t *testing.T) {
+	withHost := mxToolText + "  --host H: (mx-resume) the address peers pull the weights from\n"
+	for _, tc := range []struct {
+		name, pod, captured, text, want string
+	}{
+		{"moved, tool takes --host", "10.1.253.45", "10.1.245.116", withHost, "10.1.253.45"},
+		{"same address", "10.1.245.116", "10.1.245.116", withHost, ""},
+		{"pod address unknown", "", "10.1.245.116", withHost, ""},
+		{"tool without --host", "10.1.253.45", "10.1.245.116", mxToolText, ""},
+	} {
+		if got := restoredMXHost(tc.pod, tc.captured, tc.text); got != tc.want {
+			t.Errorf("%s: restoredMXHost = %q, want %q", tc.name, got, tc.want)
 		}
 	}
 }

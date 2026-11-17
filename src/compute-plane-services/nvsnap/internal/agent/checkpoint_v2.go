@@ -368,7 +368,7 @@ func (a *Agent) dumpV2(ctx context.Context, containerInfo *containerd.ContainerI
 				// Not on a source whose GPU resume failed: it is stopped,
 				// and is replaced (errSourceLeftSuspended).
 				if sourceRunsOn(dumped, leaveRunning) && !errors.Is(retErr, errSourceLeftSuspended) {
-					resumeModelExpress(ctx, hostPID, gsPIDs, log)
+					resumeModelExpress(ctx, hostPID, "", gsPIDs, log)
 				}
 			}()
 		}
