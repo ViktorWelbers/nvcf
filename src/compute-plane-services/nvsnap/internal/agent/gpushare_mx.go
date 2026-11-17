@@ -112,11 +112,12 @@ func sessionPIDs(procBase string, sessionHostPID int) []int {
 // the tool in the container whose init is hostPID; mx-resume with host
 // passes it as the address ModelExpress advertises. A variable for tests.
 var gpushareMX = func(ctx context.Context, hostPID int, verb, host string, pids []int) (string, error) {
-	args := []string{verb}
+	args := make([]string, 0, len(pids)+3)
 	if host != "" {
-		args = []string{"--host", host, verb}
+		args = append(args, "--host", host)
 	}
-	return gpushareTool(ctx, hostPID, gpushareMXTimeout, append(args, intsToStrings(pids)...)...)
+	args = append(append(args, verb), intsToStrings(pids)...)
+	return gpushareTool(ctx, hostPID, gpushareMXTimeout, args...)
 }
 
 // gpushareMXHostSupported reports whether the GPU tool (its text) takes

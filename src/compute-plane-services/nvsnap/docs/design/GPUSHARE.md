@@ -416,7 +416,11 @@ Limits of the move:
   otherwise (mx refuses while launches are held, and republishes over the
   network). It runs in the background, off the restore's path. A failed
   `mx-resume` is logged and does not fail the restore: the worker serves,
-  but does not share its weights with peers. The preflight passes the RDMA
+  but does not share its weights with peers. A restored pod keeps its captured
+  address as a local one (RESTORE-POD-ADDRESS.md), so ModelExpress would
+  republish that, which a peer outside the instance cannot reach: when the
+  restore moved the pod and the tool takes `--host`, the agent passes the pod's
+  own IP (`mx-resume --host <pod IP>`). The preflight passes the RDMA
   of the processes mx-pause addresses only (the GPU processes under the
   library that use ModelExpress); any other process's RDMA still blocks.
   A source whose GPU resume failed gets no `mx-resume`: it is replaced.
